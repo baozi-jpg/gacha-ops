@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>GachaOps.App</RootNamespace>
+    <AssemblyName>GachaOps</AssemblyName>
+    <Product>GachaOps</Product>
+    <Title>GachaOps</Title>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\GachaOps.ico</ApplicationIcon>
+    <PublishSingleFile>false</PublishSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\GachaOps.Core\GachaOps.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Assets\GachaOps.ico" />
+  </ItemGroup>
+</Project>

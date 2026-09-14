@@ -1,0 +1,97 @@
+using System.Text.Json.Serialization;
+using GachaOps.Core.Services;
+
+namespace GachaOps.Core.Models;
+
+public sealed class AppSettings
+{
+    public string BetterGiPath { get; set; } = string.Empty;
+
+    public string BetterGiMode { get; set; } = "OneDragon";
+
+    public string BetterGiProfile { get; set; } = "默认配置";
+
+    public string MaaPath { get; set; } = string.Empty;
+
+    public string MaaProfile { get; set; } = "Default";
+
+    public string MaaEndPath { get; set; } = string.Empty;
+
+    public string MaaEndInstance { get; set; } = "快速日常";
+
+    public bool MinimizeOnStartup { get; set; }
+
+    public bool RunWorkflowOnStartup { get; set; }
+
+    public bool ExitAfterWorkflowCompletes { get; set; }
+
+    public bool UpdateToolsBeforeLaunch { get; set; }
+
+    public List<WorkflowTaskSetting>? WorkflowTasks { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<ToolId>? QueueOrder { get; set; }
+
+    public int NoLogTimeoutMinutes { get; set; } = 10;
+
+    public int HardTimeoutMinutes { get; set; } = 180;
+
+    [JsonIgnore]
+    public TimeSpan NoLogTimeout => TimeSpan.FromMinutes(Math.Clamp(NoLogTimeoutMinutes, 1, 180));
+
+    [JsonIgnore]
+    public TimeSpan HardTimeout => TimeSpan.FromMinutes(Math.Clamp(HardTimeoutMinutes, 5, 720));
+
+    public void Normalize()
+    {
+        BetterGiMode = string.Equals(BetterGiMode, "ScriptGroups", StringComparison.OrdinalIgnoreCase)
+            ? "ScriptGroups"
+            : "OneDragon";
+        NoLogTimeoutMinutes = Math.Clamp(NoLogTimeoutMinutes, 1, 180);
+        HardTimeoutMinutes = Math.Clamp(HardTimeoutMinutes, 5, 720);
+
+        var normalizedWorkflow = new List<WorkflowTaskSetting>();
+        var seen = new HashSet<ToolId>();
+
+        if (WorkflowTasks is not null)
+        {
+            normalizedWorkflow.AddRange(WorkflowTaskPlan.CreateSnapshot(WorkflowTasks));
+            WorkflowTasks = normalizedWorkflow;
+            QueueOrder = null;
+            return;
+        }
+        else if (QueueOrder is not null)
+        {
+            foreach (var id in QueueOrder)
+            {
+                if (!Enum.IsDefined(id) || !seen.Add(id))
+                {
+                    continue;
+                }
+
+                normalizedWorkflow.Add(new WorkflowTaskSetting
+                {
+                    ToolId = id,
+                    IsEnabled = true,
+                    Channel = 1
+                });
+            }
+        }
+
+        foreach (var id in Enum.GetValues<ToolId>())
+        {
+            if (seen.Add(id))
+            {
+                normalizedWorkflow.Add(new WorkflowTaskSetting
+                {
+                    ToolId = id,
+                    IsEnabled = true,
+                    Channel = 1
+                });
+            }
+        }
+
+        WorkflowTasks = normalizedWorkflow;
+        QueueOrder = null;
+    }
+}

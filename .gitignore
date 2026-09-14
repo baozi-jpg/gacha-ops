@@ -1,0 +1,10 @@
+.dotnet/
+.cli-home/
+.vs/
+.vscode/*.log
+**/bin/
+**/obj/
+artifacts/
+TestResults/
+*.user
+*.suo

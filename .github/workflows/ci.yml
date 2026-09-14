@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore dependencies
+        run: dotnet restore GachaOps.slnx --configfile NuGet.Config --ignore-failed-sources
+
+      - name: Build solution
+        run: dotnet build GachaOps.slnx --configuration Release --no-restore
+
+      - name: Run offline tests
+        run: dotnet run --project tests/GachaOps.Core.Tests/GachaOps.Core.Tests.csproj --configuration Release --no-build
