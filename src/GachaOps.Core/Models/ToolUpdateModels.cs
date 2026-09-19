@@ -42,8 +42,8 @@ public sealed record ToolUpdateExecutionResult(
     public static ToolUpdateExecutionResult Failure(string message, bool recoveryRequired = false) =>
         new(false, message, RecoveryRequired: recoveryRequired);
 
-    public static ToolUpdateExecutionResult CancelledResult(string message) =>
-        new(false, message, Cancelled: true);
+    public static ToolUpdateExecutionResult CancelledResult(string message, bool recoveryRequired = false) =>
+        new(false, message, RecoveryRequired: recoveryRequired, Cancelled: true);
 }
 
 public enum ToolUpdateActivityPhase
@@ -60,7 +60,8 @@ public enum ToolUpdateRecoveryKind
 {
     Completed,
     RetryAllowed,
-    Failed
+    Failed,
+    Cancelled
 }
 
 public sealed record ToolUpdateRecoveryResult(

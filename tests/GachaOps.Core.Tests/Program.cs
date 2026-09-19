@@ -60,7 +60,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("同一协调器并发准备会快速拒绝且不触碰活跃更新", ConcurrentPreparationFailsFastAsync),
     ("版本检查屏障结束后跳过失败检查并继续可用更新", ToolUpdateCheckBarrierAsync),
     ("官方更新会并行执行", ToolUpdatesRunInParallelAsync),
-    ("取消会等待已启动更新安全收尾", ToolUpdateCancellationWaitsForStartedUpdatesAsync),
+    ("取消仍等待不可中断的本地写入安全收尾", ToolUpdateCancellationWaitsForStartedUpdatesAsync),
+    ("BetterGI 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.BetterGi, false)),
+    ("MAA 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.Maa, true)),
+    ("MaaEnd 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.MaaEnd, true)),
     ("更新结果保存失败只阻止依赖工具并保留恢复点", UpdateStateSaveFailureRetainsEvidenceAsync),
     ("不确定安装逐工具隔离并保留整轮身份", UncertainInstallationsAreExcludedAsync),
     ("全部准备失败仍有完整历史和一次结束提醒", AllPreparationFailuresRetainHistoryAsync),
@@ -1274,6 +1277,76 @@ static async Task ToolUpdatesRunInParallelAsync()
     releaseUpdates.SetResult();
 
     Assert.True((await run).Succeeded, "两个并行更新正常结束后应继续工作流");
+}
+
+static async Task ExternalUpdateCancellationAsync(ToolId toolId, bool selfUpdating)
+{
+    using var area = TestArea.Create();
+    var executablePath = CreateCloseWindowExecutable(area);
+    var provider = new OwnershipTestUpdateProvider(executablePath)
+    {
+        TestToolId = toolId,
+        SelfUpdating = selfUpdating,
+        WaitForUpdateProcessExit = selfUpdating
+    };
+    var store = new ToolUpdateStateStore(area.Root);
+    var coordinator = new ToolUpdateCoordinator([provider], store);
+    var settings = new AppSettings { UpdateToolsBeforeLaunch = true };
+    var workflow = Workflow((toolId, 1));
+    using var cancellation = new CancellationTokenSource();
+    var run = coordinator.PrepareAsync([new PreflightAdapter(toolId)], workflow, settings, cancellation.Token);
+    Task<ToolPreparationResult>? recovery = null;
+    Process? process = null;
+    try
+    {
+        using var readyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        ToolUpdatePendingState? pending;
+        do
+        {
+            await Task.Delay(10, readyTimeout.Token);
+            (await store.LoadAsync(readyTimeout.Token)).PendingUpdates.TryGetValue(toolId, out pending);
+        } while (pending?.ProcessId is null);
+        process = Process.GetProcessById(pending.ProcessId.Value);
+        await WaitForMainWindowAsync(process);
+
+        cancellation.Cancel();
+        var result = await run.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(result.Cancelled, "停止等待必须返回取消状态");
+        Assert.Equal(0, result.RunnableTasks.Count, "取消后不得启动游戏任务");
+        Assert.False(process.HasExited, "取消不得结束外部更新进程");
+        Assert.Equal(pending.ProcessId, (await store.LoadAsync()).PendingUpdates[toolId].ProcessId,
+            "取消后保留更新进程和安装恢复证据");
+        Assert.True(result.Warnings.Any(warning => warning.ToolId == toolId),
+            "取消结果必须说明外部更新尚需确认");
+
+        using var recoveryCancellation = new CancellationTokenSource();
+        var recoveryStarted = NewGate();
+        provider.ReadVersionCallback = _ => recoveryStarted.TrySetResult();
+        recovery = coordinator.PrepareAsync([new PreflightAdapter(toolId)], workflow, settings,
+            recoveryCancellation.Token);
+        await recoveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        recoveryCancellation.Cancel();
+        var recoveryResult = await recovery.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(recoveryResult.Cancelled, "再次启动的恢复等待也必须可取消");
+        Assert.False(process.HasExited, "取消恢复不得关闭仍在更新的进程");
+        Assert.True((await store.LoadAsync()).PendingUpdates.ContainsKey(toolId), "取消恢复不能清除证据");
+        Assert.True(recoveryResult.HistoryRecords.All(record => record.State == RunState.Cancelled),
+            "主动取消恢复不能记为工具失败");
+
+        provider.ReadVersionCallback = null;
+        _ = process.CloseMainWindow();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var resumed = await coordinator.PrepareAsync([new PreflightAdapter(toolId)], workflow, settings);
+        Assert.Equal(1, resumed.RunnableTasks.Count, "外部进程退出且旧安装未变后可恢复使用");
+        Assert.Equal(0, (await store.LoadAsync()).PendingUpdates.Count, "核验旧安装安全后清除待恢复记录");
+    }
+    finally
+    {
+        await EnsureCloseWindowProcessesExitedAsync(executablePath);
+        await run;
+        if (recovery is not null) await recovery;
+        process?.Dispose();
+    }
 }
 
 static async Task ToolUpdateCancellationWaitsForStartedUpdatesAsync()
@@ -9183,7 +9256,11 @@ file sealed class OwnershipTestUpdateProvider(string executablePath)
 
     public string? AdditionalFingerprintPath { get; init; }
 
-    public Action<int>? ReadVersionCallback { get; init; }
+    public Action<int>? ReadVersionCallback { get; set; }
+
+    public ToolId TestToolId { get; init; } = ToolId.BetterGi;
+
+    public bool SelfUpdating { get; init; } = true;
 
     public bool WaitForUpdateProcessExit { get; init; }
 
@@ -9191,13 +9268,13 @@ file sealed class OwnershipTestUpdateProvider(string executablePath)
 
     public int ReadVersionCount { get; private set; }
 
-    public override ToolId Id => ToolId.BetterGi;
+    public override ToolId Id => TestToolId;
 
     public override string DisplayName => "进程所有权测试工具";
 
     protected override string Repository => "test/process-ownership";
 
-    protected override bool StartsSelfUpdatingApplication => true;
+    protected override bool StartsSelfUpdatingApplication => SelfUpdating;
 
     protected override bool WaitForUpdateProcessExitBeforeCompletion => WaitForUpdateProcessExit;
 

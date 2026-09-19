@@ -64,6 +64,7 @@ public sealed class ToolUpdateCoordinator
         var planned = CreatePlan(adapters, workflowTasks);
         var failures = new List<Failure>();
         var completedUpdateItems = new List<string>();
+        var cancellationWarnings = new List<ToolPreparationWarning>();
         void Exclude(IEnumerable<Failure> rejected)
         {
             var items = rejected.Where(failure => planned.Any(task => task.ToolId == failure.ToolId)).ToArray();
@@ -92,7 +93,8 @@ public sealed class ToolUpdateCoordinator
             {
                 WorkflowRunId = workflowRunId,
                 Issues = failed.Issues.Concat(cancelled.Issues).ToArray(),
-                HistoryRecords = failed.HistoryRecords.Concat(cancelled.HistoryRecords).ToArray()
+                HistoryRecords = failed.HistoryRecords.Concat(cancelled.HistoryRecords).ToArray(),
+                Warnings = cancellationWarnings
             };
         }
         if (planned.Count == 0)
@@ -156,7 +158,7 @@ public sealed class ToolUpdateCoordinator
                             ? ToolCatalog.Get(provider.Id).Name
                             : ToolCatalog.Get(pending.ToolId).Name));
                 var recoveryAttempts = await Task.WhenAll(state.PendingUpdates.Values.Select(pending =>
-                    RecoverOneAsync(pending, settings))).ConfigureAwait(false);
+                    RecoverOneAsync(pending, settings, cancellationToken))).ConfigureAwait(false);
                 var recoveryFailures = new List<Failure>();
                 foreach (var attempt in recoveryAttempts)
                 {
@@ -167,6 +169,10 @@ public sealed class ToolUpdateCoordinator
                             break;
                         case ToolUpdateRecoveryKind.RetryAllowed:
                             state.PendingUpdates.Remove(attempt.Pending.ToolId);
+                            break;
+                        case ToolUpdateRecoveryKind.Cancelled:
+                            cancellationWarnings.Add(new ToolPreparationWarning(attempt.Pending.ToolId,
+                                "已停止等待，请检查工具更新", attempt.Result.Message));
                             break;
                         default:
                             recoveryFailures.Add(new Failure(
@@ -373,6 +379,12 @@ public sealed class ToolUpdateCoordinator
                                 state.PendingUpdates.Remove(attempt.Task.ToolId);
                             }
 
+                            if (state.PendingUpdates.ContainsKey(attempt.Task.ToolId))
+                            {
+                                cancellationWarnings.Add(new ToolPreparationWarning(attempt.Task.ToolId,
+                                    "已停止等待，请检查工具更新", attempt.Result.Message));
+                            }
+
                             updateCancelled = true;
                         }
                         else
@@ -480,7 +492,8 @@ public sealed class ToolUpdateCoordinator
 
     private async Task<RecoveryAttempt> RecoverOneAsync(
         ToolUpdatePendingState pending,
-        AppSettings settings)
+        AppSettings settings,
+        CancellationToken cancellationToken)
     {
         if (!_providers.TryGetValue(pending.ToolId, out var provider))
         {
@@ -491,9 +504,14 @@ public sealed class ToolUpdateCoordinator
 
         try
         {
-            var result = await provider.RecoverAsync(settings, pending, CancellationToken.None)
+            var result = await provider.RecoverAsync(settings, pending, cancellationToken)
                 .ConfigureAwait(false);
             return new RecoveryAttempt(pending, result);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new RecoveryAttempt(pending, new ToolUpdateRecoveryResult(
+                ToolUpdateRecoveryKind.Cancelled, "恢复检查已取消，保留更新记录供下次核验。"));
         }
         catch (Exception exception)
         {

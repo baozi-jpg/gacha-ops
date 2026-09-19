@@ -667,7 +667,7 @@
                     <ProgressBar x:Name="ToolUpdateProgressBar" Height="4" Margin="0,18,0,0"
                                  BorderThickness="0" Background="{StaticResource DividerBrush}"
                                  Foreground="{StaticResource PrimaryBrush}" IsIndeterminate="True" />
-                    <Button x:Name="CancelToolUpdateButton" Content="取消" Width="112" Margin="0,20,0,0"
+                    <Button x:Name="CancelToolUpdateButton" Content="取消启动" Width="112" Margin="0,20,0,0"
                             HorizontalAlignment="Center" Style="{StaticResource SecondaryButton}"
                             Click="CancelToolUpdateButton_Click" />
                 </StackPanel>
