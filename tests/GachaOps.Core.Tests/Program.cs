@@ -251,6 +251,13 @@ var tests = new (string Name, Func<Task> Run)[]
     ("集中工具目录可创建全部适配器", ToolCatalogCreatesAllAdaptersAsync)
 };
 
+if (args.Contains("--cancellation-stress", StringComparer.Ordinal))
+{
+    var cancellationTests = tests.Where(test =>
+        test.Name.Contains("更新和恢复等待可取消且保留进程", StringComparison.Ordinal)).ToArray();
+    tests = Enumerable.Range(0, 50).SelectMany(_ => cancellationTests).ToArray();
+}
+
 var failures = new List<string>();
 foreach (var test in tests)
 {
@@ -1299,14 +1306,13 @@ static async Task ExternalUpdateCancellationAsync(ToolId toolId, bool selfUpdati
     Process? process = null;
     try
     {
-        using var readyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        ToolUpdatePendingState? pending;
-        do
+        var ready = await Task.WhenAny(provider.ProcessRecorded.Task, run).WaitAsync(TimeSpan.FromSeconds(5));
+        if (ready == run)
         {
-            await Task.Delay(10, readyTimeout.Token);
-            (await store.LoadAsync(readyTimeout.Token)).PendingUpdates.TryGetValue(toolId, out pending);
-        } while (pending?.ProcessId is null);
-        process = Process.GetProcessById(pending.ProcessId.Value);
+            throw new InvalidOperationException(
+                $"更新在进程状态保存前结束：{string.Join(" | ", (await run).Issues.Select(issue => issue.Message))}");
+        }
+        process = Process.GetProcessById(await provider.ProcessRecorded.Task);
         await WaitForMainWindowAsync(process);
 
         cancellation.Cancel();
@@ -1314,7 +1320,7 @@ static async Task ExternalUpdateCancellationAsync(ToolId toolId, bool selfUpdati
         Assert.True(result.Cancelled, "停止等待必须返回取消状态");
         Assert.Equal(0, result.RunnableTasks.Count, "取消后不得启动游戏任务");
         Assert.False(process.HasExited, "取消不得结束外部更新进程");
-        Assert.Equal(pending.ProcessId, (await store.LoadAsync()).PendingUpdates[toolId].ProcessId,
+        Assert.Equal((int?)process.Id, (await store.LoadAsync()).PendingUpdates[toolId].ProcessId,
             "取消后保留更新进程和安装恢复证据");
         Assert.True(result.Warnings.Any(warning => warning.ToolId == toolId),
             "取消结果必须说明外部更新尚需确认");
@@ -9258,6 +9264,9 @@ file sealed class OwnershipTestUpdateProvider(string executablePath)
 
     public Action<int>? ReadVersionCallback { get; set; }
 
+    public TaskCompletionSource<int> ProcessRecorded { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     public ToolId TestToolId { get; init; } = ToolId.BetterGi;
 
     public bool SelfUpdating { get; init; } = true;
@@ -9296,6 +9305,20 @@ file sealed class OwnershipTestUpdateProvider(string executablePath)
 
     public Task<ToolVersionFingerprint> CaptureFingerprintForTestAsync() =>
         CaptureFingerprintAsync(new AppSettings(), CancellationToken.None);
+
+    public override Task<ToolUpdateExecutionResult> UpdateAsync(
+        AppSettings settings,
+        ToolUpdateCheckResult check,
+        ToolUpdateExecutionContext context,
+        CancellationToken cancellationToken) =>
+        base.UpdateAsync(settings, check, new ToolUpdateExecutionContext(
+            async (processId, processPath, token) =>
+            {
+                // Signal only after the real coordinator has persisted the process identity.
+                await context.ProcessStartedAsync(processId, processPath, token);
+                ProcessRecorded.TrySetResult(processId);
+            },
+            context.ReportUpdateItemsAsync), cancellationToken);
 
     public override ProcessStartInfo BuildUpdateStartInfo(AppSettings settings)
     {
