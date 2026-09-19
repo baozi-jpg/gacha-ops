@@ -356,7 +356,7 @@
                         <Grid>
                             <DataGrid x:Name="HistoryGrid" IsReadOnly="True" AutoGenerateColumns="False"
                                        CanUserAddRows="False" CanUserDeleteRows="False" CanUserReorderColumns="False"
-                                       SelectionMode="Single" AlternationCount="2"
+                                       SelectionMode="Single" AlternationCount="2" RowHeight="NaN" MinRowHeight="54"
                                        EnableRowVirtualization="True" EnableColumnVirtualization="True"
                                        VirtualizingPanel.VirtualizationMode="Recycling"
                                        ScrollViewer.CanContentScroll="True">
@@ -391,8 +391,11 @@
                                                 <Grid Margin="4,3" VerticalAlignment="Center">
                                                     <TextBlock x:Name="Summary" Text="{Binding Message}" TextWrapping="Wrap" />
                                                     <Expander x:Name="Details" Header="{Binding Message}" Visibility="Collapsed">
-                                                        <TextBlock Text="{Binding Record.Message}" TextWrapping="Wrap"
-                                                                   Margin="0,6,0,0" />
+                                                        <ScrollViewer MaxHeight="240" Margin="0,6,0,0"
+                                                                      VerticalScrollBarVisibility="Auto"
+                                                                      HorizontalScrollBarVisibility="Disabled">
+                                                            <TextBlock Text="{Binding Record.Message}" TextWrapping="Wrap" />
+                                                        </ScrollViewer>
                                                     </Expander>
                                                 </Grid>
                                                 <DataTemplate.Triggers>
