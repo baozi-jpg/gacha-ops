@@ -159,12 +159,14 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
 
             if (!StartsSelfUpdatingApplication)
             {
-                using var timeout = new CancellationTokenSource(_updateTimeout);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(_updateTimeout);
                 try
                 {
                     await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested
+                                                        && timeout.IsCancellationRequested)
                 {
                     return ToolUpdateExecutionResult.Failure(
                         $"{DisplayName} 更新超过 {_updateTimeout.TotalMinutes:0} 分钟，已停止等待；更新程序不会被强制结束。",
@@ -184,7 +186,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
                 check.TargetVersion,
                 startedAt,
                 process,
-                CancellationToken.None).ConfigureAwait(false);
+                cancellationToken).ConfigureAwait(false);
             if (fingerprint is null)
             {
                 return ToolUpdateExecutionResult.Failure(
@@ -193,18 +195,24 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
             }
 
             if (StartsSelfUpdatingApplication
-                && !await RequestNormalCloseAsync(settings, startedAt).ConfigureAwait(false))
+                && !await RequestNormalCloseAsync(settings, startedAt, cancellationToken).ConfigureAwait(false))
             {
                 return ToolUpdateExecutionResult.Failure(
                     $"{DisplayName} 已更新到 {fingerprint.Version}，但未能正常关闭；不会强制结束进程。",
                     recoveryRequired: true);
             }
 
-            fingerprint = await CaptureFingerprintAsync(settings, CancellationToken.None).ConfigureAwait(false);
+            fingerprint = await CaptureFingerprintAsync(settings, cancellationToken).ConfigureAwait(false);
             return ToolUpdateExecutionResult.Success(
                 $"{DisplayName} 已更新到 {fingerprint.Version}",
                 fingerprint,
                 [ToolCatalog.Get(Id).Name]);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Releasing our process handle leaves the external updater running. Retain its recovery record.
+            return ToolUpdateExecutionResult.CancelledResult(
+                "已停止等待，请检查工具更新", recoveryRequired: process is not null);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
                                            or InvalidDataException or JsonException
@@ -239,6 +247,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
         {
             pendingProcess = matchedProcess;
         }
+        using var pendingProcessHandle = pendingProcess;
 
         ToolVersionFingerprint? current = null;
         try
@@ -274,17 +283,13 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
                     $"{DisplayName} 上次更新中断后文件指纹发生未知变化，已阻止工作流。");
         }
 
-        ToolVersionFingerprint? recovered;
-        using (pendingProcess)
-        {
-            recovered = await WaitForTargetFingerprintAsync(
-                settings,
-                pending.TargetVersion,
-                pending.StartedAt,
-                pendingProcess,
-                CancellationToken.None,
-                currentIsTarget ? current : null).ConfigureAwait(false);
-        }
+        var recovered = await WaitForTargetFingerprintAsync(
+            settings,
+            pending.TargetVersion,
+            pending.StartedAt,
+            pendingProcess,
+            cancellationToken,
+            currentIsTarget ? current : null).ConfigureAwait(false);
         if (recovered is null)
         {
             return ToolUpdateRecoveryResult.Failed(
@@ -292,7 +297,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
         }
 
         if (StartsSelfUpdatingApplication
-            && !await RequestNormalCloseAsync(settings, pending.StartedAt).ConfigureAwait(false))
+            && !await RequestNormalCloseAsync(settings, pending.StartedAt, cancellationToken).ConfigureAwait(false))
         {
             return ToolUpdateRecoveryResult.Failed(
                 $"{DisplayName} 上次更新已完成，但更新后进程未能正常关闭。");
@@ -300,7 +305,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
 
         return ToolUpdateRecoveryResult.Completed(
             $"{DisplayName} 上次更新已恢复完成",
-            await CaptureFingerprintAsync(settings, CancellationToken.None).ConfigureAwait(false));
+            await CaptureFingerprintAsync(settings, cancellationToken).ConfigureAwait(false));
     }
 
     public abstract ProcessStartInfo BuildUpdateStartInfo(AppSettings settings);
@@ -551,6 +556,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 return null;
             }
         }
@@ -612,6 +618,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
             }
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return null;
     }
 
@@ -642,12 +649,14 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
         return found;
     }
 
-    private async Task<bool> RequestNormalCloseAsync(AppSettings settings, DateTimeOffset startedAt)
+    private async Task<bool> RequestNormalCloseAsync(
+        AppSettings settings, DateTimeOffset startedAt, CancellationToken cancellationToken)
     {
         var executablePath = GetExecutablePath(settings);
         var deadline = DateTimeOffset.UtcNow + NormalCloseTimeout;
         while (DateTimeOffset.UtcNow < deadline)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var running = FindProcessesByPath(executablePath, startedAt);
             if (running.Count == 0)
             {
@@ -669,7 +678,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
                 }
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
         }
 
         var remaining = FindProcessesByPath(executablePath, startedAt);

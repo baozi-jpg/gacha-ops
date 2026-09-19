@@ -454,12 +454,16 @@ public partial class MainWindow : Window
 
         _preparationCancellation.Cancel();
         CancelToolUpdateButton.IsEnabled = false;
-        ToolUpdateStatusText.Text = "正在取消更新";
-        SetFooter("正在取消更新", Color.FromRgb(255, 159, 10));
+        ToolUpdateStatusText.Text = "正在取消本次启动";
+        SetFooter("正在取消本次启动", Color.FromRgb(255, 159, 10));
     }
 
     private void ShowToolUpdateActivity(ToolUpdateActivity activity)
     {
+        if (_preparationCancellation?.IsCancellationRequested == true)
+        {
+            return;
+        }
         var action = activity.Phase == ToolUpdateActivityPhase.Checking
             ? "正在检查更新"
             : "正在更新";
@@ -625,7 +629,7 @@ public partial class MainWindow : Window
             {
                 HideToolUpdateOverlay();
             }
-            if (!preparation.Cancelled && preparation.Warnings.Count > 0)
+            if (preparation.Warnings.Count > 0)
             {
                 updateWarnings = preparation.Warnings;
                 LogToolUpdateWarnings(updateWarnings);
@@ -653,7 +657,8 @@ public partial class MainWindow : Window
             if (preparation.Cancelled)
             {
                 historyPersisted = await WaitForHistoryWritesAsync();
-                SetFooter(historyPersisted ? "已取消本次启动" : "已取消本次启动，且历史保存失败",
+                SetFooter(!historyPersisted ? "已取消本次启动，且历史保存失败"
+                        : preparation.Warnings.Count > 0 ? "已停止等待，请检查工具更新" : "已取消本次启动",
                     Color.FromRgb(255, 159, 10));
                 return;
             }
