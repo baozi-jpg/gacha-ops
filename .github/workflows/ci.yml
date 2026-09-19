@@ -2,9 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'codex/**' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
@@ -27,3 +31,6 @@ jobs:
 
       - name: Run offline tests
         run: dotnet run --project tests/GachaOps.Core.Tests/GachaOps.Core.Tests.csproj --configuration Release --no-build
+
+      - name: Check history details layout
+        run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File ./scripts/test-history-layout.ps1
