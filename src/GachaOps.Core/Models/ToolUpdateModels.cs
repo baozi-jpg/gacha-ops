@@ -102,6 +102,8 @@ public sealed record ToolPreparationResult(
 {
     public Guid WorkflowRunId { get; init; }
 
+    public string? BlockReason { get; init; }
+
     public IReadOnlyList<WorkflowTaskSetting> RunnableTasks { get; init; } = Array.Empty<WorkflowTaskSetting>();
 
     public IReadOnlyList<string> UpdatedItems { get; init; } = Array.Empty<string>();

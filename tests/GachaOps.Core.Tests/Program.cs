@@ -23,15 +23,18 @@ const string NewResourceVersion = MaaResourceTestData.NewVersion;
 const string NewerResourceVersion = MaaResourceTestData.NewerVersion;
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("联网失败后安装不安全时不启动其他更新", UnsafeInstallationBlocksOtherUpdatesAsync),
+    ("任一预检失败立即阻止整轮准备", PreparationFailureBlocksWholeWorkflowAsync),
+    ("未勾选的三个工具均能提前阻止准备", UnselectedRunningToolBlocksPreparationAsync),
     ("启动前发现被排除工具仍运行时整轮不启动", RunningExcludedToolBlocksPreparedWorkflowAsync),
     ("准备后才出现的工具进程阻止整轮且下次运行重查", RunningToolAfterPreparationBlocksAndResetsAsync),
-    ("未参与本轮的工具进程不阻止启动", UnplannedRunningToolDoesNotBlockAsync),
-    ("被排除工具已退出时其他任务可以启动", ExitedExcludedToolDoesNotBlockAsync),
+    ("未参与本轮的工具进程也阻止启动", UnplannedRunningToolBlocksAsync),
+    ("工具退出后重新准备可运行且不重复检查更新", ExitedExcludedToolDoesNotBlockAsync),
     ("只选两个工具及全部取消能够持久化", SelectedToolsPersistAsync),
     ("首次使用不自动添加工具", NewSettingsStartWithoutToolsAsync),
     ("修正未通过预检的工具后仍可首次检查", SessionPreflightFailureDoesNotConsumeCheckAsync),
     ("取消不会消耗尚未开始工具的检查机会", SessionCancellationKeepsUnstartedChecksAsync),
-    ("已检查工具恢复失败仍隔离且不影响新增工具", SessionFailedRecoveryRemainsBlockedAsync),
+    ("已检查工具恢复失败阻止整轮且保留检查机会", SessionFailedRecoveryRemainsBlockedAsync),
     ("更新警告不改变成功记录且阻止自动退出", UpdateWarningsKeepWindowAfterSuccessfulRunAsync),
     ("同次打开反复运行只检查每个工具一次", SessionChecksEachToolOnceAsync),
     ("更改启用工具时只检查未检查过的工具", SessionChecksOnlyNewToolsAsync),
@@ -68,14 +71,14 @@ var tests = new (string Name, Func<Task> Run)[]
     ("BetterGI 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.BetterGi, false)),
     ("MAA 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.Maa, true)),
     ("MaaEnd 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.MaaEnd, true)),
-    ("更新结果保存失败只阻止依赖工具并保留恢复点", UpdateStateSaveFailureRetainsEvidenceAsync),
-    ("不确定安装逐工具隔离并保留整轮身份", UncertainInstallationsAreExcludedAsync),
+    ("更新结果保存失败阻止整轮并保留恢复点", UpdateStateSaveFailureRetainsEvidenceAsync),
+    ("不确定安装阻止整轮并保留任务身份", UncertainInstallationsAreExcludedAsync),
     ("全部准备失败仍有完整历史和一次结束提醒", AllPreparationFailuresRetainHistoryAsync),
     ("准备取消保留先前失败和恢复证据", PreparationCancellationRetainsFailuresAsync),
     ("可运行任务沿用规范化去重顺序", RunnablePreparationUsesSnapshotAsync),
     ("空恢复集合不能伪装成安全状态", NullPendingUpdatesBlocksPreparationAsync),
     ("安全更新失败回退旧安装且不伪造任务失败", SafeUpdateFailureFallsBackAsync),
-    ("恢复失败隔离后其他工具仍完成准备", RecoveryFailureIsolatedAsync),
+    ("恢复失败后停止其他工具准备", RecoveryFailureIsolatedAsync),
     ("未完成整轮提醒保留准备原因和历史保护", IncompleteWorkflowReminderAsync),
     ("更新失败会等待其他工具并写入历史", ToolUpdateFailureWaitsForSiblingsAsync),
     ("未完成更新会在新运行前恢复", PendingToolUpdateRecoversBeforeChecksAsync),
@@ -283,6 +286,81 @@ if (failures.Count > 0)
     Environment.ExitCode = 1;
 }
 
+static async Task UnsafeInstallationBlocksOtherUpdatesAsync()
+{
+    using var area = TestArea.Create();
+    var unsafeTool = new FakeToolUpdateProvider(ToolId.BetterGi)
+    {
+        CheckHandler = _ => throw new HttpRequestException("检查失败"),
+        InstallationHandler = _ => throw new InvalidDataException("安装损坏")
+    };
+    var other = new FakeToolUpdateProvider(ToolId.Maa, updateAvailable: true);
+    var coordinator = new ToolUpdateCoordinator([unsafeTool, other], new ToolUpdateStateStore(area.Root));
+    IAutomationAdapter[] adapters = [new PreflightAdapter(ToolId.BetterGi), new PreflightAdapter(ToolId.Maa)];
+    var workflow = Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2));
+    var settings = new AppSettings { UpdateToolsBeforeLaunch = true };
+    var result = await coordinator.PrepareAsync(adapters, workflow, settings);
+    Assert.False(result.Succeeded, "不安全安装阻止整轮");
+    Assert.Equal(0, result.RunnableTasks.Count, "所有任务禁止启动");
+    Assert.Equal(1, other.CheckCount, "并行检查已完成");
+    Assert.Equal(0, other.UpdateCount, "不得继续开始更新");
+    Assert.True(result.BlockReason!.Contains("请检查配置或安装"), "提示检查配置或安装");
+    var repeated = await coordinator.PrepareAsync(adapters, workflow, settings);
+    Assert.False(repeated.Succeeded, "重新开始仍须检查本地安装");
+    Assert.Equal(1, unsafeTool.CheckCount, "联网失败也不重复检查");
+    Assert.Equal(1, other.CheckCount, "其他工具也不重复检查");
+}
+
+static async Task PreparationFailureBlocksWholeWorkflowAsync()
+{
+    foreach (var providerFailure in new[] { false, true })
+    {
+        using var area = TestArea.Create();
+        var invalid = new PreflightAdapter(ToolId.BetterGi)
+        {
+            ValidationHandler = _ => providerFailure ? ValidationResult.Success()
+                : new ValidationResult(false, ["配置不存在"])
+        };
+        var first = new FakeToolUpdateProvider(ToolId.BetterGi)
+        {
+            Validation = providerFailure ? new ValidationResult(false, ["更新入口缺失"])
+                : ValidationResult.Success()
+        };
+        var other = new FakeToolUpdateProvider(ToolId.Maa, updateAvailable: true);
+        var result = await new ToolUpdateCoordinator([first, other], new ToolUpdateStateStore(area.Root))
+            .PrepareAsync([invalid, new PreflightAdapter(ToolId.Maa)],
+                Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2)),
+                new AppSettings { UpdateToolsBeforeLaunch = true });
+        Assert.False(result.Succeeded, "预检失败阻止整轮");
+        Assert.Equal(0, result.RunnableTasks.Count, "不能放行安全子集");
+        Assert.Equal(0, other.CheckCount, "失败后不再开始联网检查");
+        Assert.Equal(0, other.UpdateCount, "失败后不再开始更新");
+        Assert.Equal(2, result.HistoryRecords.Count, "失败与跳过各记录一次");
+        Assert.Equal(RunState.Failed, result.HistoryRecords.Single(r => r.ToolId == ToolId.BetterGi).State, "保留失败");
+        Assert.Equal(RunState.Skipped, result.HistoryRecords.Single(r => r.ToolId == ToolId.Maa).State, "其他任务跳过");
+        Assert.True(result.HistoryRecords.All(r => r.WorkflowRunId == result.WorkflowRunId), "保留整轮身份");
+    }
+}
+
+static async Task UnselectedRunningToolBlocksPreparationAsync()
+{
+    foreach (var id in Enum.GetValues<ToolId>())
+    {
+        using var area = TestArea.Create();
+        var selectedId = id == ToolId.Maa ? ToolId.BetterGi : ToolId.Maa;
+        var busy = new FakeAdapter(id) { ProcessRunning = true };
+        var selected = new FakeAdapter(selectedId, RunState.Succeeded);
+        var provider = new FakeToolUpdateProvider(selectedId, updateAvailable: true);
+        var result = await new ToolUpdateCoordinator([provider], new ToolUpdateStateStore(area.Root))
+            .PrepareAsync([busy, selected], Workflow((selectedId, 1)),
+                new AppSettings { UpdateToolsBeforeLaunch = true });
+        Assert.False(result.Succeeded, "未勾选工具也必须阻止准备");
+        Assert.Equal(0, result.RunnableTasks.Count, "本轮没有可运行任务");
+        Assert.Equal(0, provider.CheckCount, "入口拦截不消耗更新检查机会");
+        Assert.Equal(0, selected.StartCount, "不能启动已选工具");
+    }
+}
+
 static async Task RunningExcludedToolBlocksPreparedWorkflowAsync()
 {
     using var current = Process.GetCurrentProcess();
@@ -292,7 +370,6 @@ static async Task RunningExcludedToolBlocksPreparedWorkflowAsync()
         var busy = new BetterGiAdapter();
         var next = new FakeAdapter(ToolId.MaaEnd, RunState.Succeeded);
         var other = new FakeAdapter(ToolId.Maa, RunState.Succeeded);
-        IAutomationAdapter[] adapters = [busy, next, other];
         var workflow = Workflow((ToolId.BetterGi, 1), (ToolId.MaaEnd, 1), (ToolId.Maa, 2));
         var settings = new AppSettings
         {
@@ -300,34 +377,15 @@ static async Task RunningExcludedToolBlocksPreparedWorkflowAsync()
             UpdateToolsBeforeLaunch = updateEnabled,
             ExitAfterWorkflowCompletes = true
         };
-        var preparation = await new ToolUpdateCoordinator(
-            [new FakeToolUpdateProvider(ToolId.Maa), new FakeToolUpdateProvider(ToolId.MaaEnd)],
-            new ToolUpdateStateStore(area.Root)).PrepareAsync(adapters, workflow, settings);
-        Assert.Equal(2, preparation.RunnableTasks.Count, "预检排除了已有进程的工具");
-        var records = new ConcurrentBag<RunRecord>(preparation.HistoryRecords);
-        var statuses = new ConcurrentBag<ToolStatusUpdate>();
-        var queue = new AutomationQueueService();
-        queue.RunRecorded += records.Add;
-        queue.StatusChanged += statuses.Add;
-        var result = await queue.RunAsync(adapters, preparation.RunnableTasks, settings,
-            preparedWorkflowRunId: preparation.WorkflowRunId, originalWorkflowTasks: workflow);
-        Assert.Equal(0, next.StartCount, "被排除的工具仍运行时，同通道不得启动");
-        Assert.Equal(0, other.StartCount, "被排除的工具仍运行时，另一通道也不得启动");
-        Assert.Equal(QueueRunResult.NotAllPlannedTasksCompleted, result, "整轮未启动不得报告成功");
-        Assert.Equal("BetterGI 仍在运行，请退出后重试", queue.StartupBlockReason, "给出可操作的提示");
-        Assert.Equal(3, records.Count, "原失败和两个未启动任务各记录一次");
-        Assert.Equal(RunState.Failed, records.Single(record => record.ToolId == ToolId.BetterGi).State,
-            "保留原预检失败");
-        foreach (var record in records.Where(record => record.ToolId != ToolId.BetterGi))
-        {
-            Assert.Equal(RunState.Skipped, record.State, "未启动任务保存为跳过");
-            var queued = statuses.Single(status => status.ToolId == record.ToolId && status.State == RunState.Queued);
-            Assert.Equal(queued.TaskExecutionId, record.TaskExecutionId, "保留任务身份");
-            Assert.Equal(queued.Channel, record.Channel, "保留通道");
-        }
-        Assert.True(records.All(record => record.WorkflowRunId == preparation.WorkflowRunId), "保留整轮身份");
-        Assert.False(WorkflowAutomationPolicy.ShouldExitAfterCompletion(settings, result, false, true, records),
-            "拦截后不能自动退出");
+        var preparation = await new ToolUpdateCoordinator([], new ToolUpdateStateStore(area.Root))
+            .PrepareAsync([busy, next, other], workflow, settings);
+        Assert.Equal(0, preparation.RunnableTasks.Count, "入口发现进程后整轮停止");
+        Assert.Equal("BetterGI 仍在运行，请退出后重试", preparation.BlockReason, "给出可操作的提示");
+        Assert.Equal(3, preparation.HistoryRecords.Count, "失败和两个跳过任务各记录一次");
+        Assert.Equal(RunState.Failed, preparation.HistoryRecords.Single(r => r.ToolId == ToolId.BetterGi).State, "保留失败");
+        Assert.True(preparation.HistoryRecords.Where(r => r.ToolId != ToolId.BetterGi).All(r => r.State == RunState.Skipped), "其余任务跳过");
+        Assert.True(preparation.HistoryRecords.All(r => r.WorkflowRunId == preparation.WorkflowRunId), "保留整轮身份");
+        Assert.Equal(3, preparation.HistoryRecords.Select(r => r.TaskExecutionId).Distinct().Count(), "任务身份独立");
         Assert.False(current.HasExited, "进程检查不结束已有进程");
     }
 }
@@ -348,7 +406,7 @@ static async Task RunningToolAfterPreparationBlocksAndResetsAsync()
     var records = new ConcurrentBag<RunRecord>();
     queue.RunRecorded += records.Add;
     var blocked = await queue.RunAsync(adapters, preparation.RunnableTasks, settings,
-        preparedWorkflowRunId: preparation.WorkflowRunId, originalWorkflowTasks: workflow);
+        preparedWorkflowRunId: preparation.WorkflowRunId);
     Assert.Equal(0, first.StartCount, "启动前才出现的进程也能拦截");
     Assert.Equal(0, other.StartCount, "另一通道不能抢先启动");
     Assert.Equal(QueueRunResult.NotAllPlannedTasksCompleted, blocked, "拦截结果未完成");
@@ -356,14 +414,14 @@ static async Task RunningToolAfterPreparationBlocksAndResetsAsync()
     Assert.True(records.All(record => record.State == RunState.Skipped), "未尝试启动的任务全部跳过");
     Assert.True(queue.StartupBlockReason is not null, "保留启动拦截原因");
     first.ProcessRunning = false;
-    var completed = await queue.RunAsync(adapters, workflow, settings, originalWorkflowTasks: workflow);
+    var completed = await queue.RunAsync(adapters, workflow, settings);
     Assert.Equal(QueueRunResult.AllPlannedTasksCompleted, completed, "退出工具后新一轮能运行");
     Assert.Equal(1, first.StartCount, "新一轮只启动一次");
     Assert.Equal(1, other.StartCount, "新一轮两个通道正常运行");
     Assert.True(queue.StartupBlockReason is null, "不得沿用上一轮拦截原因");
 }
 
-static async Task UnplannedRunningToolDoesNotBlockAsync()
+static async Task UnplannedRunningToolBlocksAsync()
 {
     foreach (var includeDisabled in new[] { false, true })
     {
@@ -373,34 +431,39 @@ static async Task UnplannedRunningToolDoesNotBlockAsync()
         if (includeDisabled)
             workflow.Add(new WorkflowTaskSetting { ToolId = ToolId.BetterGi, IsEnabled = false, Channel = 2 });
         var queue = new AutomationQueueService();
-        var result = await queue.RunAsync([unplanned, selected], workflow, new AppSettings(),
-            originalWorkflowTasks: workflow);
-        Assert.Equal(QueueRunResult.AllPlannedTasksCompleted, result, "只检查本轮已启用工具");
-        Assert.Equal(1, selected.StartCount, "已选工具正常启动");
+        var result = await queue.RunAsync([unplanned, selected], workflow, new AppSettings());
+        Assert.Equal(QueueRunResult.NotAllPlannedTasksCompleted, result, "未勾选工具也阻止启动");
+        Assert.Equal(0, selected.StartCount, "已选工具不能启动");
         Assert.Equal(0, unplanned.StartCount, "未参与的工具不启动");
-        Assert.True(queue.StartupBlockReason is null, "不产生多余拦截原因");
+        Assert.Equal("BetterGI 仍在运行，请退出后重试", queue.StartupBlockReason, "说明阻止原因");
     }
 }
 
 static async Task ExitedExcludedToolDoesNotBlockAsync()
 {
     using var area = TestArea.Create();
-    var excluded = new FakeAdapter(ToolId.BetterGi) { ProcessRunning = true };
+    var busy = new FakeAdapter(ToolId.BetterGi) { ProcessRunning = true };
     var selected = new FakeAdapter(ToolId.Maa, RunState.Succeeded);
-    IAutomationAdapter[] adapters = [excluded, selected];
-    var workflow = Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2));
-    var settings = new AppSettings();
-    var preparation = await new ToolUpdateCoordinator([], new ToolUpdateStateStore(area.Root))
-        .PrepareAsync(adapters, workflow, settings);
-    Assert.Equal(1, preparation.RunnableTasks.Count, "准备时已有进程的工具被排除");
-    excluded.ProcessRunning = false;
+    IAutomationAdapter[] adapters = [busy, selected];
+    var workflow = Workflow((ToolId.Maa, 2));
+    var settings = new AppSettings { UpdateToolsBeforeLaunch = true };
+    var provider = new FakeToolUpdateProvider(ToolId.Maa);
+    var coordinator = new ToolUpdateCoordinator([provider], new ToolUpdateStateStore(area.Root));
+    var blocked = await coordinator.PrepareAsync(adapters, workflow, settings);
+    Assert.Equal(0, blocked.RunnableTasks.Count, "存在进程时整轮停止");
+    Assert.Equal(0, provider.CheckCount, "拦截不消耗检查机会");
+    busy.ProcessRunning = false;
+    var preparation = await coordinator.PrepareAsync(adapters, workflow, settings);
+    Assert.True(preparation.Succeeded, "退出后新一轮正常准备");
+    Assert.Equal(1, provider.CheckCount, "本会话首次检查");
+    await coordinator.PrepareAsync(adapters, workflow, settings);
+    Assert.Equal(1, provider.CheckCount, "再次开始不重复联网");
     var queue = new AutomationQueueService();
     var result = await queue.RunAsync(adapters, preparation.RunnableTasks, settings,
-        preparedWorkflowRunId: preparation.WorkflowRunId, originalWorkflowTasks: workflow);
-    Assert.Equal(1, selected.StartCount, "进程已退出时不沿用旧预检消息阻断其他任务");
-    Assert.Equal(0, excluded.StartCount, "被排除的失败任务不会偷偷重试");
-    Assert.Equal(QueueRunResult.AllPlannedTasksCompleted, result, "剩余任务能正常完成");
-    Assert.True(queue.StartupBlockReason is null, "检查实际当前进程状态");
+        preparedWorkflowRunId: preparation.WorkflowRunId);
+    Assert.Equal(1, selected.StartCount, "退出后重新开始可以运行");
+    Assert.Equal(0, busy.StartCount, "未勾选工具不启动");
+    Assert.Equal(QueueRunResult.AllPlannedTasksCompleted, result, "本轮正常完成");
 }
 
 static async Task SelectedToolsPersistAsync()
@@ -1061,10 +1124,10 @@ static async Task SessionFailedRecoveryRemainsBlockedAsync()
     await coordinator.PrepareAsync(adapters, Workflow((ToolId.BetterGi, 1)), settings);
     var manual = await coordinator.PrepareAsync(adapters, Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2)), settings);
     Assert.False(manual.Succeeded, "已有检查记录不能掩盖更新恢复失败");
-    Assert.SequenceEqual([ToolId.Maa], manual.RunnableTasks.Select(task => task.ToolId), "只允许安全工具运行");
+    Assert.Equal(0, manual.RunnableTasks.Count, "恢复失败阻止整轮");
     Assert.Equal(1, provider.RecoverCount, "每次准备仍处理未完成更新");
     Assert.Equal(1, provider.CheckCount, "恢复失败不能重新检查更新");
-    Assert.Equal(1, maa.CheckCount, "新增启用的安全工具仍可首次检查");
+    Assert.Equal(0, maa.CheckCount, "恢复失败后不检查新增工具");
     Assert.True((await store.LoadAsync()).PendingUpdates.ContainsKey(ToolId.BetterGi), "必须保留恢复证据");
 }
 
@@ -1526,8 +1589,7 @@ static async Task UpdateStateSaveFailureRetainsEvidenceAsync()
     var result = await new ToolUpdateCoordinator([updating, new FakeToolUpdateProvider(ToolId.Maa)], store)
         .PrepareAsync([new PreflightAdapter(ToolId.BetterGi), new PreflightAdapter(ToolId.Maa)],
             Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2)), new AppSettings { UpdateToolsBeforeLaunch = true });
-    Assert.Equal(1, result.RunnableTasks.Count, "未参与更新的安全工具可继续");
-    Assert.Equal(ToolId.Maa, result.RunnableTasks[0].ToolId, "无法保存结果的工具被排除");
+    Assert.Equal(0, result.RunnableTasks.Count, "更新状态保存失败阻止整轮");
     Assert.True(result.Issues[0].Message.Contains("更新结果无法保存"), "记录全局存储失败原因");
     Assert.True((await store.LoadAsync()).PendingUpdates.ContainsKey(ToolId.BetterGi), "磁盘恢复点仍在");
 }
@@ -1559,16 +1621,15 @@ static async Task UncertainInstallationsAreExcludedAsync()
         var result = await new ToolUpdateCoordinator([provider, new FakeToolUpdateProvider(ToolId.Maa)], store)
             .PrepareAsync([first, second], workflow, settings);
         Assert.False(result.Succeeded, "不确定安装不能宣告全部成功");
-        Assert.Equal(1, result.RunnableTasks.Count, "只排除不安全工具");
-        Assert.Equal(ToolId.Maa, result.RunnableTasks[0].ToolId, "安全工具继续");
+        Assert.Equal(0, result.RunnableTasks.Count, "不安全安装阻止整轮");
         var records = new List<RunRecord>(result.HistoryRecords);
         var queue = new AutomationQueueService();
         queue.RunRecorded += records.Add;
         var queueResult = await queue.RunAsync([first, second], result.RunnableTasks, settings,
             preparedWorkflowRunId: result.WorkflowRunId);
         Assert.Equal(0, first.StartCount, "不启动不安全工具");
-        Assert.Equal(1, second.StartCount, "实际启动安全工具");
-        Assert.Equal(QueueRunResult.AllPlannedTasksCompleted, queueResult, "安全子集完成");
+        Assert.Equal(0, second.StartCount, "其他工具也不启动");
+        Assert.Equal(QueueRunResult.NotAllPlannedTasksCompleted, queueResult, "整轮未启动");
         Assert.True(records.All(record => record.WorkflowRunId == result.WorkflowRunId), "准备和队列保留同轮身份");
         Assert.Equal(result.Issues[0].TaskExecutionId, result.HistoryRecords[0].TaskExecutionId, "失败任务身份一致");
         Assert.False(WorkflowAutomationPolicy.ShouldExitAfterCompletion(settings, queueResult, false, true, records),
@@ -1607,9 +1668,9 @@ static async Task PreparationCancellationRetainsFailuresAsync()
     using var area = TestArea.Create();
     using var cancellation = new CancellationTokenSource();
     var store = new ToolUpdateStateStore(area.Root);
-    var invalid = new FakeToolUpdateProvider(ToolId.BetterGi)
+    var invalid = new FakeToolUpdateProvider(ToolId.BetterGi, updateAvailable: true)
     {
-        Validation = new ValidationResult(false, ["配置无效"])
+        UpdateHandler = (_, _) => Task.FromResult(ToolUpdateExecutionResult.Failure("更新失败", recoveryRequired: true))
     };
     var cancelling = new FakeToolUpdateProvider(ToolId.Maa, updateAvailable: true)
     {
@@ -1696,10 +1757,10 @@ static async Task RecoveryFailureIsolatedAsync()
     var result = await new ToolUpdateCoordinator([failed, sibling], store).PrepareAsync(
         [new PreflightAdapter(ToolId.BetterGi), new PreflightAdapter(ToolId.Maa)],
         Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2)), new AppSettings { UpdateToolsBeforeLaunch = true });
-    Assert.Equal(1, sibling.CheckCount, "安全工具仍应完成检查");
+    Assert.Equal(0, sibling.CheckCount, "恢复失败后不检查其他工具");
     Assert.Equal(0, failed.CheckCount, "恢复失败工具不能联网重试");
     Assert.True((await store.LoadAsync()).PendingUpdates.ContainsKey(ToolId.BetterGi), "保留恢复证据");
-    Assert.Equal(1, result.HistoryRecords.Count, "失败记录不能丢失");
+    Assert.Equal(2, result.HistoryRecords.Count, "失败与跳过记录不能丢失");
 }
 
 static Task IncompleteWorkflowReminderAsync()

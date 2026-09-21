@@ -39,8 +39,7 @@ public sealed class AutomationQueueService
         IReadOnlyList<WorkflowTaskSetting> workflowTasks,
         AppSettings settings,
         CancellationToken cancellationToken = default,
-        Guid? preparedWorkflowRunId = null,
-        IReadOnlyList<WorkflowTaskSetting>? originalWorkflowTasks = null)
+        Guid? preparedWorkflowRunId = null)
     {
         if (!await _runGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
@@ -90,12 +89,10 @@ public sealed class AutomationQueueService
             PublishSkipped(stoppedBeforeChannelsStarted, "已停止所有通道的后续任务");
 
             cancellationToken.ThrowIfCancellationRequested();
-            // Preparation may have excluded a tool that is still running. Check the
-            // original enabled plan before allowing either channel to start.
-            var runningTools = WorkflowTaskPlan.CreateEnabledSnapshot(originalWorkflowTasks ?? workflowTasks)
-                .Where(task => adaptersById.TryGetValue(task.ToolId, out var adapter)
-                    && adapter.IsProcessRunning(settings))
-                .Select(task => ToolCatalog.Get(task.ToolId).Name)
+            // Recheck every tool after preparation and the optional startup countdown.
+            var runningTools = adaptersById.Values
+                .Where(adapter => adapter.IsProcessRunning(settings))
+                .Select(adapter => ToolCatalog.Get(adapter.Id).Name)
                 .ToArray();
             if (runningTools.Length > 0)
             {
