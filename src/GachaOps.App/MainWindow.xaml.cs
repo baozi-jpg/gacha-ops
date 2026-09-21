@@ -663,6 +663,16 @@ public partial class MainWindow : Window
                 return;
             }
 
+            if (!preparation.Succeeded)
+            {
+                historyPersisted = await WaitForHistoryWritesAsync();
+                SetFooter("本轮任务未启动", Color.FromRgb(255, 159, 10));
+                var reason = preparation.BlockReason ?? "启动准备失败，请检查配置或安装";
+                ShowCompletionWithErrorsWarning(historyPersisted
+                    ? reason : $"{reason}{Environment.NewLine}历史保存失败");
+                return;
+            }
+
             if (preparation.RunnableTasks.Count > 0
                 && startedAutomatically && !await WaitForStartupRunDelayAsync())
             {
@@ -680,7 +690,7 @@ public partial class MainWindow : Window
                 }
 
                 var runTask = _queue.RunAsync(adapters, preparation.RunnableTasks, settingsForRun, _appCancellation.Token,
-                    preparation.WorkflowRunId, originalWorkflowTasks: workflowTasks);
+                    preparation.WorkflowRunId);
                 queueResult = await runTask;
                 if (_queue.StartupBlockReason is { } blockReason)
                 {

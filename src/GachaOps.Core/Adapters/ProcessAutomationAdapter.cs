@@ -45,7 +45,8 @@ public abstract class ProcessAutomationAdapter : IAutomationAdapter
     public bool IsProcessRunning(AppSettings settings)
     {
         var executablePath = GetExecutablePath(settings);
-        return !string.IsNullOrWhiteSpace(executablePath) && IsProcessAlreadyRunning(executablePath);
+        return (!string.IsNullOrWhiteSpace(executablePath) && IsProcessAlreadyRunning(executablePath))
+            || IsProcessAlreadyRunning(ToolCatalog.Get(Id).Name);
     }
 
     public bool CanContinueAfterUnstartedFailure(AppSettings settings)

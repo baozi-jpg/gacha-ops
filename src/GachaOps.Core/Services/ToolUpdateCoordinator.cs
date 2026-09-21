@@ -67,19 +67,30 @@ public sealed class ToolUpdateCoordinator
         var cancellationWarnings = new List<ToolPreparationWarning>();
         void Exclude(IEnumerable<Failure> rejected)
         {
-            var items = rejected.Where(failure => planned.Any(task => task.ToolId == failure.ToolId)).ToArray();
+            var items = rejected.ToArray();
             failures.AddRange(items);
             planned.RemoveAll(task => items.Any(failure => failure.ToolId == task.ToolId));
         }
-        ToolPreparationResult Finish()
+        ToolPreparationResult Finish(string? blockReason = null)
         {
             var result = failures.Count > 0
                 ? CreateFailureResult(failures, workflowRunId, startedAt)
                 : ToolPreparationResult.Success();
+            var blocked = failures.Count > 0 || blockReason is not null;
+            blockReason ??= failures.Count > 0
+                ? $"{string.Join("、", failures.Select(f => ToolCatalog.Get(f.ToolId).Name).Distinct())} 启动准备失败，请检查配置或安装"
+                : null;
+            var skipped = blocked ? planned.Select(task => CreateIssue(
+                new Failure(task.ToolId, "启动准备未通过，本轮未启动", task.Channel),
+                RunState.Skipped, workflowRunId, startedAt, DateTimeOffset.Now)).ToArray() : [];
             return result with
             {
+                Succeeded = !blocked,
+                BlockReason = blockReason,
+                Issues = result.Issues.Concat(skipped.Select(item => item.Issue)).ToArray(),
+                HistoryRecords = result.HistoryRecords.Concat(skipped.Select(item => item.Record)).ToArray(),
                 WorkflowRunId = workflowRunId,
-                RunnableTasks = planned.Select(task => task.Setting).ToArray(),
+                RunnableTasks = blocked ? [] : planned.Select(task => task.Setting).ToArray(),
                 UpdatedItems = NormalizeActivityItems(completedUpdateItems),
                 Warnings = planned.Where(task => _updateWarnings.ContainsKey(task.ToolId))
                     .Select(task => _updateWarnings[task.ToolId]).ToArray()
@@ -131,6 +142,16 @@ public sealed class ToolUpdateCoordinator
 
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            var runningTools = adapters.Where(adapter => adapter.IsProcessRunning(settings)).ToArray();
+            if (runningTools.Length > 0)
+            {
+                var reason = $"{string.Join("、", runningTools.Select(adapter => ToolCatalog.Get(adapter.Id).Name))} 仍在运行，请退出后重试";
+                Exclude(planned.Where(task => runningTools.Any(adapter => adapter.Id == task.ToolId))
+                    .Select(task => new Failure(task.ToolId, reason, task.Channel)));
+                return Finish(reason);
+            }
+
             ToolUpdatePersistentState state;
             try
             {
@@ -198,6 +219,7 @@ public sealed class ToolUpdateCoordinator
                 if (recoveryFailures.Count > 0)
                 {
                     Exclude(recoveryFailures);
+                    return Finish();
                 }
             }
 
@@ -210,6 +232,7 @@ public sealed class ToolUpdateCoordinator
             if (preflightFailures.Count > 0)
             {
                 Exclude(preflightFailures);
+                return Finish();
             }
 
             if (cancellationToken.IsCancellationRequested)
@@ -226,9 +249,8 @@ public sealed class ToolUpdateCoordinator
             if (providerFailures.Count > 0)
             {
                 Exclude(providerFailures);
+                return Finish();
             }
-
-            if (planned.Count == 0) return Finish();
 
             // A previous check failure still requires a safe local installation on every run.
             foreach (var task in planned.Where(task => _updateWarnings.ContainsKey(task.ToolId)).ToArray())
@@ -237,6 +259,8 @@ public sealed class ToolUpdateCoordinator
                     .ConfigureAwait(false);
                 if (failure is not null) Exclude([failure]);
             }
+
+            if (failures.Count > 0) return Finish();
 
             var uncheckedTools = planned.Where(task => !_checkedTools.Contains(task.ToolId)).ToArray();
             if (uncheckedTools.Length == 0) return cancellationToken.IsCancellationRequested ? Cancel() : Finish();
@@ -272,6 +296,8 @@ public sealed class ToolUpdateCoordinator
                 if (installationFailure is not null)
                     Exclude([installationFailure with { Message = $"{attempt.Warning!.Detail}；{installationFailure.Message}" }]);
             }
+            if (failures.Count > 0) return Finish();
+
             var successfulChecks = checkAttempts
                 .Where(attempt => attempt.Check is not null)
                 .ToArray();
@@ -439,6 +465,8 @@ public sealed class ToolUpdateCoordinator
             {
                 return Cancel();
             }
+
+            if (failures.Count > 0) return Finish();
 
             var postUpdateFailures = ValidateAutomationPlan(planned, settings);
             postUpdateFailures.AddRange(ValidateUpdateProviders(planned, settings));
