@@ -456,7 +456,7 @@
                                     </ComboBox>
                                     <TextBlock Grid.Row="2" Text="任务配置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
                                     <ComboBox x:Name="BetterGiProfileComboBox" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3"
-                                              VerticalAlignment="Center" IsEditable="True"
+                                              VerticalAlignment="Center" IsEditable="False"
                                               SelectionChanged="SettingsComboBox_SelectionChanged"
                                               KeyDown="SettingsTextInput_KeyDown"
                                               LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
@@ -490,7 +490,7 @@
                                             Style="{StaticResource BrowseButton}" VerticalAlignment="Center" />
                                     <TextBlock Grid.Row="1" Text="运行配置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
                                     <ComboBox x:Name="MaaProfileComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
-                                              VerticalAlignment="Center" IsEditable="True"
+                                              VerticalAlignment="Center" IsEditable="False"
                                               SelectionChanged="SettingsComboBox_SelectionChanged"
                                               KeyDown="SettingsTextInput_KeyDown"
                                               LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
@@ -524,7 +524,7 @@
                                             Style="{StaticResource BrowseButton}" VerticalAlignment="Center" />
                                     <TextBlock Grid.Row="1" Text="运行实例" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
                                     <ComboBox x:Name="MaaEndInstanceComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
-                                              VerticalAlignment="Center" IsEditable="True"
+                                              VerticalAlignment="Center" IsEditable="False"
                                               SelectionChanged="SettingsComboBox_SelectionChanged"
                                               KeyDown="SettingsTextInput_KeyDown"
                                               LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
