@@ -23,6 +23,10 @@ const string NewResourceVersion = MaaResourceTestData.NewVersion;
 const string NewerResourceVersion = MaaResourceTestData.NewerVersion;
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("启动前发现被排除工具仍运行时整轮不启动", RunningExcludedToolBlocksPreparedWorkflowAsync),
+    ("准备后才出现的工具进程阻止整轮且下次运行重查", RunningToolAfterPreparationBlocksAndResetsAsync),
+    ("未参与本轮的工具进程不阻止启动", UnplannedRunningToolDoesNotBlockAsync),
+    ("被排除工具已退出时其他任务可以启动", ExitedExcludedToolDoesNotBlockAsync),
     ("只选两个工具及全部取消能够持久化", SelectedToolsPersistAsync),
     ("首次使用不自动添加工具", NewSettingsStartWithoutToolsAsync),
     ("修正未通过预检的工具后仍可首次检查", SessionPreflightFailureDoesNotConsumeCheckAsync),
@@ -277,6 +281,126 @@ Console.WriteLine($"\n结果：{tests.Length - failures.Count}/{tests.Length} �
 if (failures.Count > 0)
 {
     Environment.ExitCode = 1;
+}
+
+static async Task RunningExcludedToolBlocksPreparedWorkflowAsync()
+{
+    using var current = Process.GetCurrentProcess();
+    foreach (var updateEnabled in new[] { false, true })
+    {
+        using var area = TestArea.Create();
+        var busy = new BetterGiAdapter();
+        var next = new FakeAdapter(ToolId.MaaEnd, RunState.Succeeded);
+        var other = new FakeAdapter(ToolId.Maa, RunState.Succeeded);
+        IAutomationAdapter[] adapters = [busy, next, other];
+        var workflow = Workflow((ToolId.BetterGi, 1), (ToolId.MaaEnd, 1), (ToolId.Maa, 2));
+        var settings = new AppSettings
+        {
+            BetterGiPath = current.MainModule!.FileName,
+            UpdateToolsBeforeLaunch = updateEnabled,
+            ExitAfterWorkflowCompletes = true
+        };
+        var preparation = await new ToolUpdateCoordinator(
+            [new FakeToolUpdateProvider(ToolId.Maa), new FakeToolUpdateProvider(ToolId.MaaEnd)],
+            new ToolUpdateStateStore(area.Root)).PrepareAsync(adapters, workflow, settings);
+        Assert.Equal(2, preparation.RunnableTasks.Count, "预检排除了已有进程的工具");
+        var records = new ConcurrentBag<RunRecord>(preparation.HistoryRecords);
+        var statuses = new ConcurrentBag<ToolStatusUpdate>();
+        var queue = new AutomationQueueService();
+        queue.RunRecorded += records.Add;
+        queue.StatusChanged += statuses.Add;
+        var result = await queue.RunAsync(adapters, preparation.RunnableTasks, settings,
+            preparedWorkflowRunId: preparation.WorkflowRunId, originalWorkflowTasks: workflow);
+        Assert.Equal(0, next.StartCount, "被排除的工具仍运行时，同通道不得启动");
+        Assert.Equal(0, other.StartCount, "被排除的工具仍运行时，另一通道也不得启动");
+        Assert.Equal(QueueRunResult.NotAllPlannedTasksCompleted, result, "整轮未启动不得报告成功");
+        Assert.Equal("BetterGI 仍在运行，请退出后重试", queue.StartupBlockReason, "给出可操作的提示");
+        Assert.Equal(3, records.Count, "原失败和两个未启动任务各记录一次");
+        Assert.Equal(RunState.Failed, records.Single(record => record.ToolId == ToolId.BetterGi).State,
+            "保留原预检失败");
+        foreach (var record in records.Where(record => record.ToolId != ToolId.BetterGi))
+        {
+            Assert.Equal(RunState.Skipped, record.State, "未启动任务保存为跳过");
+            var queued = statuses.Single(status => status.ToolId == record.ToolId && status.State == RunState.Queued);
+            Assert.Equal(queued.TaskExecutionId, record.TaskExecutionId, "保留任务身份");
+            Assert.Equal(queued.Channel, record.Channel, "保留通道");
+        }
+        Assert.True(records.All(record => record.WorkflowRunId == preparation.WorkflowRunId), "保留整轮身份");
+        Assert.False(WorkflowAutomationPolicy.ShouldExitAfterCompletion(settings, result, false, true, records),
+            "拦截后不能自动退出");
+        Assert.False(current.HasExited, "进程检查不结束已有进程");
+    }
+}
+
+static async Task RunningToolAfterPreparationBlocksAndResetsAsync()
+{
+    using var area = TestArea.Create();
+    var first = new FakeAdapter(ToolId.BetterGi, RunState.Succeeded);
+    var other = new FakeAdapter(ToolId.Maa, RunState.Succeeded);
+    IAutomationAdapter[] adapters = [first, other];
+    var workflow = Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2));
+    var settings = new AppSettings();
+    var preparation = await new ToolUpdateCoordinator([], new ToolUpdateStateStore(area.Root))
+        .PrepareAsync(adapters, workflow, settings);
+    Assert.Equal(2, preparation.RunnableTasks.Count, "准备时两个工具均可运行");
+    first.ProcessRunning = true;
+    var queue = new AutomationQueueService();
+    var records = new ConcurrentBag<RunRecord>();
+    queue.RunRecorded += records.Add;
+    var blocked = await queue.RunAsync(adapters, preparation.RunnableTasks, settings,
+        preparedWorkflowRunId: preparation.WorkflowRunId, originalWorkflowTasks: workflow);
+    Assert.Equal(0, first.StartCount, "启动前才出现的进程也能拦截");
+    Assert.Equal(0, other.StartCount, "另一通道不能抢先启动");
+    Assert.Equal(QueueRunResult.NotAllPlannedTasksCompleted, blocked, "拦截结果未完成");
+    Assert.Equal(2, records.Count, "两个任务各记录一次");
+    Assert.True(records.All(record => record.State == RunState.Skipped), "未尝试启动的任务全部跳过");
+    Assert.True(queue.StartupBlockReason is not null, "保留启动拦截原因");
+    first.ProcessRunning = false;
+    var completed = await queue.RunAsync(adapters, workflow, settings, originalWorkflowTasks: workflow);
+    Assert.Equal(QueueRunResult.AllPlannedTasksCompleted, completed, "退出工具后新一轮能运行");
+    Assert.Equal(1, first.StartCount, "新一轮只启动一次");
+    Assert.Equal(1, other.StartCount, "新一轮两个通道正常运行");
+    Assert.True(queue.StartupBlockReason is null, "不得沿用上一轮拦截原因");
+}
+
+static async Task UnplannedRunningToolDoesNotBlockAsync()
+{
+    foreach (var includeDisabled in new[] { false, true })
+    {
+        var unplanned = new FakeAdapter(ToolId.BetterGi) { ProcessRunning = true };
+        var selected = new FakeAdapter(ToolId.Maa, RunState.Succeeded);
+        var workflow = Workflow((ToolId.Maa, 1)).ToList();
+        if (includeDisabled)
+            workflow.Add(new WorkflowTaskSetting { ToolId = ToolId.BetterGi, IsEnabled = false, Channel = 2 });
+        var queue = new AutomationQueueService();
+        var result = await queue.RunAsync([unplanned, selected], workflow, new AppSettings(),
+            originalWorkflowTasks: workflow);
+        Assert.Equal(QueueRunResult.AllPlannedTasksCompleted, result, "只检查本轮已启用工具");
+        Assert.Equal(1, selected.StartCount, "已选工具正常启动");
+        Assert.Equal(0, unplanned.StartCount, "未参与的工具不启动");
+        Assert.True(queue.StartupBlockReason is null, "不产生多余拦截原因");
+    }
+}
+
+static async Task ExitedExcludedToolDoesNotBlockAsync()
+{
+    using var area = TestArea.Create();
+    var excluded = new FakeAdapter(ToolId.BetterGi) { ProcessRunning = true };
+    var selected = new FakeAdapter(ToolId.Maa, RunState.Succeeded);
+    IAutomationAdapter[] adapters = [excluded, selected];
+    var workflow = Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2));
+    var settings = new AppSettings();
+    var preparation = await new ToolUpdateCoordinator([], new ToolUpdateStateStore(area.Root))
+        .PrepareAsync(adapters, workflow, settings);
+    Assert.Equal(1, preparation.RunnableTasks.Count, "准备时已有进程的工具被排除");
+    excluded.ProcessRunning = false;
+    var queue = new AutomationQueueService();
+    var result = await queue.RunAsync(adapters, preparation.RunnableTasks, settings,
+        preparedWorkflowRunId: preparation.WorkflowRunId, originalWorkflowTasks: workflow);
+    Assert.Equal(1, selected.StartCount, "进程已退出时不沿用旧预检消息阻断其他任务");
+    Assert.Equal(0, excluded.StartCount, "被排除的失败任务不会偷偷重试");
+    Assert.Equal(QueueRunResult.AllPlannedTasksCompleted, result, "剩余任务能正常完成");
+    Assert.True(queue.StartupBlockReason is null, "检查实际当前进程状态");
 }
 
 static async Task SelectedToolsPersistAsync()
@@ -8455,6 +8579,8 @@ file sealed class BurstLogAdapter(int lineCount) : IAutomationAdapter
 
     public ValidationResult Validate(AppSettings settings) => ValidationResult.Success();
 
+    public bool IsProcessRunning(AppSettings settings) => false;
+
     public ProcessStartInfo BuildStartInfo(AppSettings settings) => new();
 
     public Task<AutomationRunHandle> StartAsync(AppSettings settings, CancellationToken cancellationToken) =>
@@ -8496,6 +8622,10 @@ file sealed class FakeAdapter : IAutomationAdapter
 
     public int StartCount => Volatile.Read(ref _startCount);
 
+    public bool ProcessRunning { get; set; }
+
+    public bool IsProcessRunning(AppSettings settings) => ProcessRunning;
+
     public Task? MonitorGate { get; init; }
 
     public Action? ValidateAction { get; init; }
@@ -8510,7 +8640,7 @@ file sealed class FakeAdapter : IAutomationAdapter
     public ValidationResult Validate(AppSettings settings)
     {
         ValidateAction?.Invoke();
-        return ValidationResult.Success();
+        return ProcessRunning ? ValidationResult.Failure($"{DisplayName} 已经在运行") : ValidationResult.Success();
     }
 
     public ProcessStartInfo BuildStartInfo(AppSettings settings) => new();
@@ -8551,6 +8681,8 @@ file sealed class PreflightAdapter(ToolId id) : IAutomationAdapter
     public string DisplayName => ToolCatalog.Get(Id).DisplayName;
 
     public int ValidationCount => Volatile.Read(ref _validationCount);
+
+    public bool IsProcessRunning(AppSettings settings) => false;
 
     public Func<int, ValidationResult>? ValidationHandler { get; init; }
 
