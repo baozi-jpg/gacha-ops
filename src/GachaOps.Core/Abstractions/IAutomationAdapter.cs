@@ -11,6 +11,8 @@ public interface IAutomationAdapter
 
     ValidationResult Validate(AppSettings settings);
 
+    bool IsProcessRunning(AppSettings settings);
+
     // Called only when this run has not attempted StartAsync. Unknown is unsafe.
     bool CanContinueAfterUnstartedFailure(AppSettings settings) => false;
 

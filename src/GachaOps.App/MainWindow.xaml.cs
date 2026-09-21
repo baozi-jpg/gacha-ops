@@ -680,8 +680,16 @@ public partial class MainWindow : Window
                 }
 
                 var runTask = _queue.RunAsync(adapters, preparation.RunnableTasks, settingsForRun, _appCancellation.Token,
-                    preparation.WorkflowRunId);
+                    preparation.WorkflowRunId, originalWorkflowTasks: workflowTasks);
                 queueResult = await runTask;
+                if (_queue.StartupBlockReason is { } blockReason)
+                {
+                    historyPersisted = await WaitForHistoryWritesAsync();
+                    SetFooter("本轮任务未启动", Color.FromRgb(255, 159, 10));
+                    ShowCompletionWithErrorsWarning(historyPersisted
+                        ? blockReason : $"{blockReason}{Environment.NewLine}历史保存失败");
+                    return;
+                }
             }
             if (!preparation.Succeeded || GetActiveRunRecords().Any(record => record.State is
                 RunState.Failed or RunState.TimedOut or RunState.Skipped or RunState.Cancelled))

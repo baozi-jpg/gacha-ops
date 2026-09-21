@@ -33,13 +33,19 @@ public abstract class ProcessAutomationAdapter : IAutomationAdapter
             issues.Add($"找不到 {DisplayName} 日志目录：{source.DirectoryPath}");
         }
 
-        if (File.Exists(executablePath) && IsProcessAlreadyRunning(executablePath))
+        if (IsProcessRunning(settings))
         {
             issues.Add($"{DisplayName} 已经在运行，为避免重复任务不会再次启动。");
         }
 
         ValidateAdditional(settings, issues);
         return issues.Count == 0 ? ValidationResult.Success() : new ValidationResult(false, issues);
+    }
+
+    public bool IsProcessRunning(AppSettings settings)
+    {
+        var executablePath = GetExecutablePath(settings);
+        return !string.IsNullOrWhiteSpace(executablePath) && IsProcessAlreadyRunning(executablePath);
     }
 
     public bool CanContinueAfterUnstartedFailure(AppSettings settings)

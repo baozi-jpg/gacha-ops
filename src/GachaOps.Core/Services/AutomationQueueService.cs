@@ -21,6 +21,8 @@ public sealed class AutomationQueueService
 
     public bool IsRunning => _isRunning;
 
+    public string? StartupBlockReason { get; private set; }
+
     public bool IsStopAfterCurrentRequested
     {
         get
@@ -37,7 +39,8 @@ public sealed class AutomationQueueService
         IReadOnlyList<WorkflowTaskSetting> workflowTasks,
         AppSettings settings,
         CancellationToken cancellationToken = default,
-        Guid? preparedWorkflowRunId = null)
+        Guid? preparedWorkflowRunId = null,
+        IReadOnlyList<WorkflowTaskSetting>? originalWorkflowTasks = null)
     {
         if (!await _runGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
@@ -50,6 +53,7 @@ public sealed class AutomationQueueService
             _activeScheduledTasks = [];
             _activeWorkflowRunId = workflowRunId;
             _stopAfterCurrent = false;
+            StartupBlockReason = null;
             _isRunning = true;
         }
 
@@ -84,6 +88,21 @@ public sealed class AutomationQueueService
             }
 
             PublishSkipped(stoppedBeforeChannelsStarted, "已停止所有通道的后续任务");
+
+            cancellationToken.ThrowIfCancellationRequested();
+            // Preparation may have excluded a tool that is still running. Check the
+            // original enabled plan before allowing either channel to start.
+            var runningTools = WorkflowTaskPlan.CreateEnabledSnapshot(originalWorkflowTasks ?? workflowTasks)
+                .Where(task => adaptersById.TryGetValue(task.ToolId, out var adapter)
+                    && adapter.IsProcessRunning(settings))
+                .Select(task => ToolCatalog.Get(task.ToolId).Name)
+                .ToArray();
+            if (runningTools.Length > 0)
+            {
+                StartupBlockReason = $"{string.Join("、", runningTools)} 仍在运行，请退出后重试";
+                SkipUnstartedTasks(scheduledTasks, 0, StartupBlockReason);
+                return QueueRunResult.NotAllPlannedTasksCompleted;
+            }
 
             var channelTasks = scheduledTasks
                 .GroupBy(task => task.Setting.Channel)
