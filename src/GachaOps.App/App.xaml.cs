@@ -1,4 +1,7 @@
 using System.Threading;
+using System.IO;
+using System.Diagnostics;
+using System.Security.Principal;
 using System.Windows;
 using System.Windows.Threading;
 using GachaOps.Core.Services;
@@ -10,11 +13,41 @@ public partial class App : Application
     private readonly CrashLogStore _crashLogStore = new();
     private Mutex? _singleInstanceMutex;
     private bool _ownsSingleInstanceMutex;
+    private readonly CancellationTokenSource _pipeCancellation = new();
+    private Task? _pipeListener;
+    private static string PipeName => $"GachaOps-{WindowsIdentity.GetCurrent().User?.Value}-{Process.GetCurrentProcess().SessionId}";
 
-    protected override void OnStartup(StartupEventArgs e)
+    protected override async void OnStartup(StartupEventArgs e)
     {
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
+
+        var request = ScheduledLaunch.Parse(e.Args, DateTimeOffset.Now);
+        if (e.Args.Length > 0 && request is null)
+        {
+            Shutdown();
+            return;
+        }
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        if (request is { Reminder: true })
+        {
+            try
+            {
+                var reminderSettings = (await new SettingsStore().LoadAsync()).Settings;
+                var reason = ScheduledLaunch.Validate(reminderSettings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out var date);
+                if (reason is null && reminderSettings.NotificationsEnabled && reminderSettings.NotifyBeforeScheduledRun
+                    && new ScheduledLaunchStore(GachaOps.App.MainWindow.DataRoot).TryClaim(request, date))
+                {
+                    var delivery = await new BarkNotificationService().SendAsync(reminderSettings, RunNotificationKind.Reminder,
+                        "GachaOps · 定时提醒", $"计划于 {request.Time} 运行当前已启用任务（本机时间）。请保持登录、未锁屏并停留在桌面。");
+                    if (delivery.Error is { } error) _crashLogStore.TryWrite("BarkNotification", new InvalidOperationException(error));
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+            { _crashLogStore.TryWrite("ScheduledReminder", exception); }
+            Shutdown();
+            return;
+        }
 
         // Keep the legacy identity so the old and renamed app cannot run together.
         const string mutexName = "Global\\GachaOps.SingleInstance";
@@ -22,7 +55,23 @@ public partial class App : Application
         _ownsSingleInstanceMutex = createdNew;
         if (!createdNew)
         {
-            AppDialog.ShowModal(null, "GachaOps", "GachaOps 已经在运行。", AppDialogKind.Information);
+            if (request is not null)
+            {
+                if (!await ScheduledInstancePipe.ForwardAsync(PipeName, request))
+                {
+                    _crashLogStore.TryWrite("ScheduledForward", new InvalidOperationException("定时请求转交未获确认，请检查已有实例；不会重试"));
+                    try
+                    {
+                        var settings = (await new SettingsStore().LoadAsync()).Settings;
+                        var delivery = await new BarkNotificationService().SendAsync(settings, RunNotificationKind.Result,
+                            "GachaOps · 定时状态待确认", $"定时 {request.Time} 转交未获确认，请检查已有实例。不会排队或重试，请查看本地诊断日志。");
+                        if (delivery.Error is { } error) _crashLogStore.TryWrite("BarkNotification", new InvalidOperationException(error));
+                    }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                    { _crashLogStore.TryWrite("ScheduledForward", exception); }
+                }
+            }
+            else AppDialog.ShowModal(null, "GachaOps", "GachaOps 已经在运行。", AppDialogKind.Information);
             Shutdown();
             return;
         }
@@ -34,15 +83,43 @@ public partial class App : Application
         {
             var loadResult = new SettingsStore().LoadAsync().GetAwaiter().GetResult();
             var settings = loadResult.Settings;
-            var mainWindow = new MainWindow(settings);
+            // Capture before Show/Activate; our own window must not manufacture permission.
+            WorkflowRunSummary? startupFailure = null;
+            var initialBlock = request is null ? null
+                : ScheduledLaunch.Validate(settings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out _) ?? ScheduledDesktopGuard.Check();
+            if (request is not null && initialBlock is not null)
+            {
+                var validation = ScheduledLaunch.Validate(settings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out var date);
+                var claimFailed = false;
+                try
+                {
+                    if (validation is null && !new ScheduledLaunchStore(GachaOps.App.MainWindow.DataRoot).TryClaim(request, date))
+                    { Shutdown(); return; }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+                {
+                    claimFailed = true;
+                    validation = "无法安全保存定时认领记录";
+                    _crashLogStore.TryWrite("ScheduledClaim", exception);
+                }
+                var report = await ScheduledRunReport.SkipAsync(settings, request, validation ?? initialBlock, GachaOps.App.MainWindow.DataRoot,
+                    new HistoryStore(), new BarkNotificationService());
+                if (report.Persisted && !claimFailed) { Shutdown(); return; }
+                startupFailure = report.Summary;
+            }
+            var mainWindow = new MainWindow(settings, initialBlock is null ? request : null, request is not null);
             MainWindow = mainWindow;
-            if (settings.MinimizeOnStartup)
+            if (settings.MinimizeOnStartup || request is not null)
             {
                 mainWindow.WindowState = WindowState.Minimized;
                 mainWindow.ShowActivated = false;
             }
 
             mainWindow.Show();
+            if (startupFailure is not null) mainWindow.ShowScheduledFailure(startupFailure);
+            ShutdownMode = ShutdownMode.OnMainWindowClose;
+            _pipeListener = ScheduledInstancePipe.ListenAsync(PipeName,
+                incoming => Dispatcher.Invoke(() => { _ = mainWindow.HandleScheduledRequestAsync(incoming); }), _pipeCancellation.Token);
             if (loadResult.RecoveredFromCorruptSettings)
             {
                 AppDialog.ShowModal(
@@ -62,6 +139,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _pipeCancellation.Cancel();
         DispatcherUnhandledException -= OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException -= OnAppDomainUnhandledException;
         if (_ownsSingleInstanceMutex)

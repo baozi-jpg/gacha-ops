@@ -92,8 +92,10 @@ public partial class MainWindow : Window
     private int _displayedLogCharacters;
     private int _droppedPendingLogLines;
 
-    public MainWindow(AppSettings settings)
+    public MainWindow(AppSettings settings, ScheduledRequest? scheduledRequest = null, bool suppressStartupRun = false)
     {
+        _initialScheduledRequest = scheduledRequest;
+        _suppressStartupRun = suppressStartupRun;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         InitializeComponent();
         _adapters = ToolCatalog.CreateAdapters().ToDictionary(adapter => adapter.Id);
@@ -124,6 +126,7 @@ public partial class MainWindow : Window
         try
         {
             ApplySettingsToControls();
+            InitializeScheduleControls();
         }
         finally
         {
@@ -181,7 +184,10 @@ public partial class MainWindow : Window
             {
                 SetFooter("准备就绪", Color.FromRgb(52, 199, 89));
             }
-            await RunStartupWorkflowIfEnabledAsync();
+            RefreshScheduledRegistration();
+            _initializationComplete = true;
+            if (_initialScheduledRequest is not null) await HandleScheduledRequestAsync(_initialScheduledRequest);
+            else if (!_suppressStartupRun) await RunStartupWorkflowIfEnabledAsync();
         }
         catch (OperationCanceledException) when (_appCancellation.IsCancellationRequested)
         {
@@ -522,7 +528,7 @@ public partial class MainWindow : Window
     }
 
     private async Task RunEnabledWorkflowAsync(
-        bool startedAutomatically)
+        bool startedAutomatically, ScheduledRequest? scheduledRequest = null)
     {
         if (IsWorkflowEditingLocked)
         {
@@ -536,7 +542,8 @@ public partial class MainWindow : Window
             var settingsForRun = await SaveSettingsFromControlsAsync(SettingsRunSaveFailureFooterText);
             if (settingsForRun is null)
             {
-                await SummarizeUnstartedRunAsync(_settings, "设置未保存，本次任务未启动");
+                if (scheduledRequest is not null) await ReportScheduledSkipAsync(scheduledRequest, "设置未保存，本次任务未启动", currentRun: true);
+                else await SummarizeUnstartedRunAsync(_settings, "设置未保存，本次任务未启动");
                 if (startedAutomatically)
                 {
                     RestoreWindowForInteraction();
@@ -552,7 +559,8 @@ public partial class MainWindow : Window
             var snapshot = WorkflowTaskPlan.CreateSnapshot(settingsForRun.WorkflowTasks!);
             if (!snapshot.Any(task => task.IsEnabled))
             {
-                await SummarizeUnstartedRunAsync(settingsForRun, "没有已启用任务，本次任务未启动");
+                if (scheduledRequest is not null) await ReportScheduledSkipAsync(scheduledRequest, "没有已启用任务，本次任务未启动", currentRun: true);
+                else await SummarizeUnstartedRunAsync(settingsForRun, "没有已启用任务，本次任务未启动");
                 if (startedAutomatically)
                 {
                     RestoreWindowForInteraction();
@@ -569,7 +577,8 @@ public partial class MainWindow : Window
                 settingsForRun,
                 restoreWindowForErrors: startedAutomatically,
                 startedAutomatically: startedAutomatically,
-                minimizeBeforeQueueStart: !startedAutomatically);
+                minimizeBeforeQueueStart: !startedAutomatically,
+                scheduledRequest: scheduledRequest);
         }
         finally
         {
@@ -584,7 +593,8 @@ public partial class MainWindow : Window
         AppSettings settingsForRun,
         bool restoreWindowForErrors = false,
         bool startedAutomatically = false,
-        bool minimizeBeforeQueueStart = false)
+        bool minimizeBeforeQueueStart = false,
+        ScheduledRequest? scheduledRequest = null)
     {
         if (_queue.IsRunning || _isPreparing)
         {
@@ -695,11 +705,28 @@ public partial class MainWindow : Window
             }
 
             if (preparation.RunnableTasks.Count > 0
-                && startedAutomatically && !await WaitForStartupRunDelayAsync())
+                && startedAutomatically && scheduledRequest is null && !await WaitForStartupRunDelayAsync())
             {
                 summaryReason = "已取消本次自动运行";
                 historyPersisted = await WaitForHistoryWritesAsync();
                 SetFooter("已取消本次自动运行", Color.FromRgb(255, 159, 10));
+                return;
+            }
+
+            if (scheduledRequest is not null && ScheduledDesktopGuard.Check() is { } foregroundReason)
+            {
+                summaryReason = $"定时已跳过：{foregroundReason}";
+                foreach (var task in preparation.RunnableTasks)
+                    TrackHistoryWrite(new RunRecord
+                    {
+                        ToolId = task.ToolId, ToolName = ToolCatalog.Get(task.ToolId).Name, Channel = task.Channel,
+                        WorkflowRunId = workflowRunId, TaskExecutionId = Guid.NewGuid(),
+                        StartedAt = DateTimeOffset.Now, EndedAt = DateTimeOffset.Now, State = RunState.Skipped,
+                        Message = summaryReason
+                    });
+                historyPersisted = await WaitForHistoryWritesAsync();
+                SetFooter(summaryReason, Color.FromRgb(255, 159, 10));
+                if (!historyPersisted) RestoreWindowForInteraction();
                 return;
             }
 
@@ -735,7 +762,7 @@ public partial class MainWindow : Window
             summaryReason = "本轮已取消";
             // Closing GachaOps stops monitoring only; adapters never kill the external process.
         }
-        catch (InvalidOperationException exception)
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
         {
             summaryReason = "本次运行未完成";
             _crashLogStore.TryWrite("Workflow", exception);
@@ -751,6 +778,16 @@ public partial class MainWindow : Window
         {
             _queue.StatusChanged -= NotifyActualStart;
             var endedAt = DateTimeOffset.Now;
+            if (scheduledRequest is not null)
+            {
+                try { new ScheduledLaunchStore(DataRoot).Record(scheduledRequest, summaryReason ?? queueResult.ToString()); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    historyPersisted = false;
+                    completionWarning = "定时结果保存失败，请查看本轮详情";
+                    _crashLogStore.TryWrite("ScheduledHistory", exception);
+                }
+            }
             await startNotification;
             _lastRunSummary = WorkflowRunSummary.Create(workflowRunId, startedAt, endedAt,
                 workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings);
@@ -908,7 +945,9 @@ public partial class MainWindow : Window
                 || targetWorkflowRevision > _savedWorkflowRevision)
             {
                 await _settingsStore.SaveAsync(settings, _appCancellation.Token);
+                var scheduleChanged = !ScheduleSettingsEqual(settings, _settings);
                 _settings = settings;
+                if (scheduleChanged) RefreshScheduledRegistration();
                 _savedWorkflowRevision = targetWorkflowRevision;
             }
             else
@@ -971,7 +1010,8 @@ public partial class MainWindow : Window
 
     private static bool SettingsAreEquivalent(AppSettings left, AppSettings right)
     {
-        return string.Equals(left.BetterGiPath, right.BetterGiPath, StringComparison.Ordinal)
+        return ScheduleSettingsEqual(left, right)
+               && string.Equals(left.BetterGiPath, right.BetterGiPath, StringComparison.Ordinal)
                && string.Equals(left.BetterGiMode, right.BetterGiMode, StringComparison.Ordinal)
                && string.Equals(left.BetterGiProfile, right.BetterGiProfile, StringComparison.Ordinal)
                && string.Equals(left.MaaPath, right.MaaPath, StringComparison.Ordinal)
@@ -1006,6 +1046,8 @@ public partial class MainWindow : Window
     {
         var settings = new AppSettings
         {
+            ScheduledLaunchEnabled = ScheduledLaunchCheckBox.IsChecked == true,
+            DailySchedules = _scheduleRows.ToList(),
             BetterGiPath = BetterGiPathTextBox.Text.Trim(),
             BetterGiMode = SelectedBetterGiMode(),
             BetterGiProfile = (BetterGiProfileComboBox.SelectedItem as string ?? BetterGiProfileComboBox.Text).Trim(),

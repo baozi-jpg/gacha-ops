@@ -538,6 +538,29 @@
 
                         <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
                             <StackPanel>
+                                <TextBlock Text="每日定时" FontSize="17" FontWeight="SemiBold" />
+                                <CheckBox x:Name="ScheduledLaunchCheckBox" Content="启用定时运行" Margin="0,14,0,8" Click="SettingsToggle_Click" />
+                                <TextBlock x:Name="ScheduleTimeZoneText" TextWrapping="Wrap" Margin="0,0,0,10" />
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button DockPanel.Dock="Right" Content="添加时刻" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}" Click="AddScheduleButton_Click" />
+                                    <ComboBox x:Name="ScheduleTimeComboBox" IsEditable="True" IsTextSearchEnabled="False" />
+                                </DockPanel>
+                                <ItemsControl x:Name="ScheduleList">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <DockPanel Margin="0,0,0,8">
+                                                <Button DockPanel.Dock="Right" Content="移除" Style="{StaticResource SecondaryButton}" Click="RemoveScheduleButton_Click" />
+                                                <CheckBox Content="{Binding Time}" IsChecked="{Binding IsEnabled, Mode=OneWay}" VerticalAlignment="Center" Click="ScheduleRowToggle_Click" />
+                                            </DockPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock x:Name="ScheduleStatusText" Text="正在检查定时状态" TextWrapping="Wrap" Margin="0,8,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                        <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
                                 <TextBlock Text="通知" FontSize="17" FontWeight="SemiBold" />
                                 <CheckBox x:Name="NotificationsEnabledCheckBox" Content="启用 Bark 通知"
                                           Margin="0,14,0,12" Click="SettingsToggle_Click" />
