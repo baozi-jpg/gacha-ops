@@ -27,6 +27,16 @@ public sealed class AppSettings
 
     public bool UpdateToolsBeforeLaunch { get; set; }
 
+    public bool NotificationsEnabled { get; set; }
+
+    public bool NotifyBeforeScheduledRun { get; set; } = true;
+
+    public bool NotifyRunStarted { get; set; }
+
+    public bool NotifyRunResult { get; set; } = true;
+
+    public string BarkAddress { get; set; } = string.Empty;
+
     public List<WorkflowTaskSetting>? WorkflowTasks { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -44,6 +54,7 @@ public sealed class AppSettings
 
     public void Normalize()
     {
+        BarkAddress = BarkAddress?.Trim() ?? string.Empty;
         BetterGiMode = string.Equals(BetterGiMode, "ScriptGroups", StringComparison.OrdinalIgnoreCase)
             ? "ScriptGroups"
             : "OneDragon";

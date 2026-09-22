@@ -22,6 +22,8 @@ public partial class MainWindow : Window
     private readonly HistoryStore _historyStore = new();
     private readonly CrashLogStore _crashLogStore = new();
     private readonly AutomationQueueService _queue = new();
+    private readonly BarkNotificationService _notifications = new();
+    private WorkflowRunSummary? _lastRunSummary;
     private readonly Dictionary<ToolId, IAutomationAdapter> _adapters;
     private readonly ToolUpdateCoordinator _toolUpdateCoordinator;
     private readonly WorkflowTaskCoordinator _workflow = new();
@@ -534,6 +536,7 @@ public partial class MainWindow : Window
             var settingsForRun = await SaveSettingsFromControlsAsync(SettingsRunSaveFailureFooterText);
             if (settingsForRun is null)
             {
+                await SummarizeUnstartedRunAsync(_settings, "设置未保存，本次任务未启动");
                 if (startedAutomatically)
                 {
                     RestoreWindowForInteraction();
@@ -549,6 +552,7 @@ public partial class MainWindow : Window
             var snapshot = WorkflowTaskPlan.CreateSnapshot(settingsForRun.WorkflowTasks!);
             if (!snapshot.Any(task => task.IsEnabled))
             {
+                await SummarizeUnstartedRunAsync(settingsForRun, "没有已启用任务，本次任务未启动");
                 if (startedAutomatically)
                 {
                     RestoreWindowForInteraction();
@@ -598,6 +602,8 @@ public partial class MainWindow : Window
             _activeRunRecords.Clear();
         }
 
+        _lastRunSummary = null;
+        LastRunDetailsButton.IsEnabled = false;
         ResetLiveLog();
         _activityItems.Clear();
         UpdateActivityEmptyState();
@@ -607,6 +613,19 @@ public partial class MainWindow : Window
         var queueFinished = false;
         var queueResult = QueueRunResult.NotAllPlannedTasksCompleted;
         var historyPersisted = false;
+        var workflowRunId = Guid.NewGuid();
+        var startedAt = DateTimeOffset.Now;
+        string? summaryReason = null;
+        string? completionWarning = null;
+        var startNotified = 0;
+        Task startNotification = Task.CompletedTask;
+        void NotifyActualStart(ToolStatusUpdate update)
+        {
+            if (update.State == RunState.Running && Interlocked.CompareExchange(ref startNotified, 1, 0) == 0)
+                startNotification = SendNotificationAsync(settingsForRun, RunNotificationKind.Started,
+                    "GachaOps · 开始运行", $"开始执行 {string.Join("、", workflowTasks.Select(task => ToolCatalog.Get(task.ToolId).Name))}");
+        }
+        _queue.StatusChanged += NotifyActualStart;
         IReadOnlyList<ToolPreparationWarning> updateWarnings = [];
         try
         {
@@ -621,6 +640,7 @@ public partial class MainWindow : Window
                 preparationCancellation.Token);
             _activePreparationTask = preparationTask;
             var preparation = await preparationTask;
+            workflowRunId = preparation.WorkflowRunId;
             if (!preparation.Cancelled && preparation.UpdatedItems.Count > 0)
             {
                 await ShowToolUpdateCompletionAsync(preparation.UpdatedItems);
@@ -656,6 +676,7 @@ public partial class MainWindow : Window
 
             if (preparation.Cancelled)
             {
+                summaryReason = "已取消本次启动";
                 historyPersisted = await WaitForHistoryWritesAsync();
                 SetFooter(!historyPersisted ? "已取消本次启动，且历史保存失败"
                         : preparation.Warnings.Count > 0 ? "已停止等待，请检查工具更新" : "已取消本次启动",
@@ -668,14 +689,16 @@ public partial class MainWindow : Window
                 historyPersisted = await WaitForHistoryWritesAsync();
                 SetFooter("本轮任务未启动", Color.FromRgb(255, 159, 10));
                 var reason = preparation.BlockReason ?? "启动准备失败，请检查配置或安装";
-                ShowCompletionWithErrorsWarning(historyPersisted
-                    ? reason : $"{reason}{Environment.NewLine}历史保存失败");
+                summaryReason = reason;
+                completionWarning = historyPersisted ? reason : $"{reason}{Environment.NewLine}历史保存失败";
                 return;
             }
 
             if (preparation.RunnableTasks.Count > 0
                 && startedAutomatically && !await WaitForStartupRunDelayAsync())
             {
+                summaryReason = "已取消本次自动运行";
+                historyPersisted = await WaitForHistoryWritesAsync();
                 SetFooter("已取消本次自动运行", Color.FromRgb(255, 159, 10));
                 return;
             }
@@ -696,8 +719,8 @@ public partial class MainWindow : Window
                 {
                     historyPersisted = await WaitForHistoryWritesAsync();
                     SetFooter("本轮任务未启动", Color.FromRgb(255, 159, 10));
-                    ShowCompletionWithErrorsWarning(historyPersisted
-                        ? blockReason : $"{blockReason}{Environment.NewLine}历史保存失败");
+                    summaryReason = blockReason;
+                    completionWarning = historyPersisted ? blockReason : $"{blockReason}{Environment.NewLine}历史保存失败";
                     return;
                 }
             }
@@ -709,22 +732,31 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
+            summaryReason = "本轮已取消";
             // Closing GachaOps stops monitoring only; adapters never kill the external process.
         }
         catch (InvalidOperationException exception)
         {
+            summaryReason = "本次运行未完成";
             _crashLogStore.TryWrite("Workflow", exception);
             historyPersisted = await WaitForHistoryWritesAsync();
             SetFooter("本次运行未完成", Color.FromRgb(255, 59, 48));
             var details = WorkflowAutomationPolicy.CreateCompletionWithErrorsMessage(
                 QueueRunResult.NotAllPlannedTasksCompleted, GetActiveRunRecords(),
                 _isClosing || _appCancellation.IsCancellationRequested, historyPersisted, workflowTasks, updateWarnings);
-            if (details is not null)
-                ShowCompletionWithErrorsWarning(details);
+            completionWarning = details;
             return;
         }
         finally
         {
+            _queue.StatusChanged -= NotifyActualStart;
+            var endedAt = DateTimeOffset.Now;
+            await startNotification;
+            _lastRunSummary = WorkflowRunSummary.Create(workflowRunId, startedAt, endedAt,
+                workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings);
+            LastRunDetailsButton.IsEnabled = true;
+            await SendNotificationAsync(settingsForRun, RunNotificationKind.Result,
+                _lastRunSummary.Title, _lastRunSummary.Body);
             HideToolUpdateOverlay();
             _isPreparing = false;
             _preparationCancellation = null;
@@ -763,6 +795,8 @@ public partial class MainWindow : Window
                     SetFooter("任务已完成", Color.FromRgb(52, 199, 89));
                 }
             }
+            if (completionWarning is not null && !_isClosing && !_appCancellation.IsCancellationRequested)
+                ShowCompletionWithErrorsWarning(completionWarning);
         }
 
         var shutdownCancellationRequested = _isClosing
@@ -948,6 +982,11 @@ public partial class MainWindow : Window
                && left.RunWorkflowOnStartup == right.RunWorkflowOnStartup
                && left.ExitAfterWorkflowCompletes == right.ExitAfterWorkflowCompletes
                && left.UpdateToolsBeforeLaunch == right.UpdateToolsBeforeLaunch
+               && left.NotificationsEnabled == right.NotificationsEnabled
+               && left.NotifyBeforeScheduledRun == right.NotifyBeforeScheduledRun
+               && left.NotifyRunStarted == right.NotifyRunStarted
+               && left.NotifyRunResult == right.NotifyRunResult
+               && string.Equals(left.BarkAddress, right.BarkAddress, StringComparison.Ordinal)
                && left.NoLogTimeoutMinutes == right.NoLogTimeoutMinutes
                && left.HardTimeoutMinutes == right.HardTimeoutMinutes
                && (left.WorkflowTasks ?? []).SequenceEqual(right.WorkflowTasks ?? []);
@@ -978,6 +1017,11 @@ public partial class MainWindow : Window
             RunWorkflowOnStartup = RunWorkflowOnStartupCheckBox.IsChecked == true,
             ExitAfterWorkflowCompletes = ExitAfterWorkflowCompletesCheckBox.IsChecked == true,
             UpdateToolsBeforeLaunch = UpdateToolsBeforeLaunchCheckBox.IsChecked == true,
+            NotificationsEnabled = NotificationsEnabledCheckBox.IsChecked == true,
+            NotifyBeforeScheduledRun = NotifyBeforeScheduledRunCheckBox.IsChecked == true,
+            NotifyRunStarted = NotifyRunStartedCheckBox.IsChecked == true,
+            NotifyRunResult = NotifyRunResultCheckBox.IsChecked == true,
+            BarkAddress = BarkAddressPasswordBox.Password.Trim(),
             WorkflowTasks = ReadSelectedWorkflow(),
             NoLogTimeoutMinutes = noLogMinutes,
             HardTimeoutMinutes = hardMinutes
@@ -1088,6 +1132,11 @@ public partial class MainWindow : Window
         RunWorkflowOnStartupCheckBox.IsChecked = _settings.RunWorkflowOnStartup;
         ExitAfterWorkflowCompletesCheckBox.IsChecked = _settings.ExitAfterWorkflowCompletes;
         UpdateToolsBeforeLaunchCheckBox.IsChecked = _settings.UpdateToolsBeforeLaunch;
+        NotificationsEnabledCheckBox.IsChecked = _settings.NotificationsEnabled;
+        NotifyBeforeScheduledRunCheckBox.IsChecked = _settings.NotifyBeforeScheduledRun;
+        NotifyRunStartedCheckBox.IsChecked = _settings.NotifyRunStarted;
+        NotifyRunResultCheckBox.IsChecked = _settings.NotifyRunResult;
+        BarkAddressPasswordBox.Password = _settings.BarkAddress;
         NoLogTimeoutTextBox.Text = _settings.NoLogTimeoutMinutes.ToString();
         HardTimeoutTextBox.Text = _settings.HardTimeoutMinutes.ToString();
         _workflow.Load(_settings.WorkflowTasks!, _settings);
@@ -1579,6 +1628,61 @@ public partial class MainWindow : Window
     }
 
     private async void RefreshHistoryButton_Click(object sender, RoutedEventArgs e) => await RefreshHistoryAsync();
+
+    private async Task<NotificationDeliveryResult> SendNotificationAsync(AppSettings settings,
+        RunNotificationKind kind, string title, string body)
+    {
+        if (_isClosing) return new(false);
+        var result = await _notifications.SendAsync(settings, kind, title, body, _appCancellation.Token);
+        if (result.Error is { } error)
+            _crashLogStore.TryWrite("BarkNotification", new InvalidOperationException(error));
+        return result;
+    }
+
+    private async Task SummarizeUnstartedRunAsync(AppSettings settings, string reason)
+    {
+        var now = DateTimeOffset.Now;
+        _lastRunSummary = WorkflowRunSummary.Create(Guid.NewGuid(), now, now,
+            WorkflowTaskPlan.CreateEnabledSnapshot(settings.WorkflowTasks ?? []), [],
+            QueueRunResult.NotAllPlannedTasksCompleted, true, reason);
+        LastRunDetailsButton.IsEnabled = true;
+        await SendNotificationAsync(settings, RunNotificationKind.Result, _lastRunSummary.Title, _lastRunSummary.Body);
+    }
+
+    private async void TestNotificationButton_Click(object sender, RoutedEventArgs e)
+    {
+        TestNotificationButton.IsEnabled = false;
+        try
+        {
+            var settings = await SaveSettingsFromControlsAsync();
+            if (settings is null) return;
+            var result = await SendNotificationAsync(settings, RunNotificationKind.Test,
+                "GachaOps · 测试通知", "Bark 通知测试，请确认手机是否收到。");
+            if (!_isClosing)
+                AppDialog.ShowModal(this, "测试通知", result.Sent ? "Bark 服务已接收，请检查手机。"
+                    : result.Error ?? "请先启用通知。", result.Sent ? AppDialogKind.Information : AppDialogKind.Warning);
+        }
+        finally { TestNotificationButton.IsEnabled = true; }
+    }
+
+    private void LastRunDetailsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastRunSummary is { } summary)
+            AppDialog.ShowModal(this, summary.Title, summary.Details, AppDialogKind.Information);
+    }
+
+    private void HistoryRunDetailsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (HistoryGrid.SelectedItem is not HistoryRow row) return;
+        var records = row.Record.WorkflowRunId is { } id
+            ? _historyRows.Select(item => item.Record).Where(record => record.WorkflowRunId == id).ToArray()
+            : [row.Record];
+        var details = string.Join(Environment.NewLine + Environment.NewLine, records.Select(record =>
+            $"{record.ToolName} · {RunStatePresentation.StateName(record.State)} · {RunStatePresentation.FormatDuration(record.Duration)}{Environment.NewLine}"
+            + $"工作流 ID：{record.WorkflowRunId}{Environment.NewLine}记录 ID：{record.Id}{Environment.NewLine}"
+            + record.Message + Environment.NewLine + string.Join(Environment.NewLine, record.LogExcerpt)));
+        AppDialog.ShowModal(this, "本轮历史详情", details, AppDialogKind.Information);
+    }
 
     private async Task<bool> RefreshHistoryAsync()
     {
