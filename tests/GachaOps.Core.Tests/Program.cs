@@ -23,6 +23,13 @@ const string NewResourceVersion = MaaResourceTestData.NewVersion;
 const string NewerResourceVersion = MaaResourceTestData.NewerVersion;
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("Bark 设置兼容旧文件并保留独立子选择", NotificationSettingsRoundTripAsync),
+    ("通知总开关及子开关均阻止请求", NotificationSwitchesGateRequestsAsync),
+    ("自建 Bark 前缀与设备密钥使用 JSON 提交", BarkCustomEndpointAsync),
+    ("Bark 失败与响应原文均不泄漏密钥", BarkFailuresAreSanitizedAsync),
+    ("Bark 超时包含响应正文且取消有界", BarkTimeoutAndCancellationAsync),
+    ("整轮汇总隔离身份并保留异常和日志", WorkflowSummaryIncludesFailuresAsync),
+    ("整轮成功与缺失任务历史失败准确区分", WorkflowSummarySuccessPolicyAsync),
     ("联网失败后安装不安全时不启动其他更新", UnsafeInstallationBlocksOtherUpdatesAsync),
     ("任一预检失败立即阻止整轮准备", PreparationFailureBlocksWholeWorkflowAsync),
     ("未勾选的三个工具均能提前阻止准备", UnselectedRunningToolBlocksPreparationAsync),
@@ -284,6 +291,157 @@ Console.WriteLine($"\n结果：{tests.Length - failures.Count}/{tests.Length} �
 if (failures.Count > 0)
 {
     Environment.ExitCode = 1;
+}
+
+static async Task NotificationSettingsRoundTripAsync()
+{
+    using var area = TestArea.Create();
+    await File.WriteAllTextAsync(area.File("settings.json"), "{}");
+    var store = new SettingsStore(area.Root);
+    var settings = (await store.LoadAsync()).Settings;
+    Assert.False(settings.NotificationsEnabled, "旧设置默认不发送");
+    Assert.True(settings.NotifyBeforeScheduledRun && settings.NotifyRunResult, "默认提醒和结果开启");
+    Assert.False(settings.NotifyRunStarted, "默认开始通知关闭");
+    settings.BarkAddress = " https://bark.invalid/prefix/test-device ";
+    settings.NotifyBeforeScheduledRun = false;
+    settings.NotifyRunStarted = true;
+    await store.SaveAsync(settings);
+    var restored = (await store.LoadAsync()).Settings;
+    Assert.False(restored.NotificationsEnabled || restored.NotifyBeforeScheduledRun, "总开关关闭保存子选择");
+    Assert.True(restored.NotifyRunStarted && restored.NotifyRunResult, "子选择无损");
+    Assert.Equal(settings.BarkAddress, restored.BarkAddress, "地址往返");
+    Assert.Equal(TimeSpan.FromMinutes(5), BarkNotificationService.ReminderLeadTime, "提前五分钟");
+}
+
+static async Task NotificationSwitchesGateRequestsAsync()
+{
+    var count = 0;
+    using var client = new HttpClient(new NotificationTestHandler((_, _) =>
+    {
+        count++;
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"code\":200}") });
+    }));
+    var sender = new BarkNotificationService(client);
+    var settings = new AppSettings { BarkAddress = "https://bark.invalid/device" };
+    foreach (var kind in Enum.GetValues<RunNotificationKind>())
+        Assert.False((await sender.SendAsync(settings, kind, "测试", "内容")).Sent, "总开关关闭无请求");
+    Assert.Equal(0, count, "不联网");
+    settings.NotificationsEnabled = true;
+    await sender.SendAsync(settings, RunNotificationKind.Started, "开始", "内容");
+    Assert.Equal(0, count, "开始默认不发送");
+    await sender.SendAsync(settings, RunNotificationKind.Reminder, "提醒", "内容");
+    await sender.SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    Assert.Equal(2, count, "通知不依赖自动运行或定时");
+    settings.NotifyBeforeScheduledRun = false;
+    settings.NotifyRunResult = false;
+    await sender.SendAsync(settings, RunNotificationKind.Reminder, "提醒", "内容");
+    await sender.SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    Assert.Equal(2, count, "各子开关关闭生效");
+    await sender.SendAsync(settings, RunNotificationKind.Test, "测试", "内容");
+    Assert.Equal(3, count, "测试只需总开关");
+    settings.NotifyRunStarted = true;
+    await sender.SendAsync(settings, RunNotificationKind.Started, "开始", "内容");
+    Assert.Equal(4, count, "开始独立启用");
+}
+
+static async Task BarkCustomEndpointAsync()
+{
+    using var client = new HttpClient(new NotificationTestHandler(async (request, token) =>
+    {
+        Assert.Equal("http://localhost:8080/bark/push", request.RequestUri!.AbsoluteUri, "保留反向代理前缀和端口");
+        Assert.Equal(HttpMethod.Post, request.Method, "POST");
+        using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        Assert.Equal("test device", json.RootElement.GetProperty("device_key").GetString(), "解码密钥只在正文中");
+        Assert.Equal("中文 & 内容", json.RootElement.GetProperty("body").GetString(), "正文无需路径编码");
+        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"code\":200}") };
+    }));
+    var result = await new BarkNotificationService(client).SendAsync(new AppSettings
+    {
+        NotificationsEnabled = true, BarkAddress = "http://localhost:8080/bark/test%20device/"
+    }, RunNotificationKind.Result, "结果", "中文 & 内容");
+    Assert.True(result.Sent, "自建服务可用");
+}
+
+static async Task BarkFailuresAreSanitizedAsync()
+{
+    const string secret = "private-device-key";
+    var settings = new AppSettings { NotificationsEnabled = true, BarkAddress = "https://bark.invalid/" + secret };
+    foreach (var content in new[] { "broken " + secret, "{\"code\":400,\"message\":\"" + secret + "\"}", "[]", "{\"code\":\"200\"}" })
+    {
+        using var client = new HttpClient(new NotificationTestHandler((_, _) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(content) })));
+        var result = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+        Assert.False(result.Sent, "错误不能报成功");
+        Assert.False(result.Error!.Contains(secret), "不输出响应原文");
+    }
+    using var failureClient = new HttpClient(new NotificationTestHandler((_, _) => throw new HttpRequestException(secret)));
+    var failed = await new BarkNotificationService(failureClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    Assert.False(failed.Error!.Contains(secret), "异常不泄漏密钥");
+    using var rejectedClient = new HttpClient(new NotificationTestHandler((_, _) => Task.FromResult(
+        new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent(secret) })));
+    var rejected = await new BarkNotificationService(rejectedClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    Assert.Equal("Bark 服务返回 HTTP 403", rejected.Error, "只记录 HTTP 状态");
+    foreach (var address in new[] { "", "file:///secret", "https://bark.invalid/", "https://user:pass@bark.invalid/key", "https://bark.invalid/key?token=secret" })
+    {
+        settings.BarkAddress = address;
+        var invalid = await new BarkNotificationService(failureClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+        Assert.True(invalid.Error!.StartsWith("Bark 地址无效"), "非法地址不发请求");
+    }
+}
+
+static async Task BarkTimeoutAndCancellationAsync()
+{
+    var settings = new AppSettings { NotificationsEnabled = true, BarkAddress = "https://bark.invalid/device" };
+    using var client = new HttpClient(new NotificationTestHandler((_, _) => Task.FromResult(
+        new HttpResponseMessage(HttpStatusCode.OK) { Content = new NotificationSlowContent() })));
+    var watch = Stopwatch.StartNew();
+    var result = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    Assert.Equal("通知发送超时", result.Error, "正文也受五秒超时约束");
+    Assert.True(watch.Elapsed < TimeSpan.FromSeconds(15), "超时有界");
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    var cancelled = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容", cancellation.Token);
+    Assert.Equal("通知发送已取消", cancelled.Error, "关闭时取消发送");
+}
+
+static Task WorkflowSummaryIncludesFailuresAsync()
+{
+    var id = Guid.NewGuid();
+    var start = DateTimeOffset.Now;
+    var record = new RunRecord { ToolId = ToolId.Maa, ToolName = "MAA", StartedAt = start,
+        EndedAt = start.AddMinutes(2), State = RunState.CompletedWithErrors, Message = "任务步骤异常",
+        WorkflowRunId = id, Channel = 2, LogExcerpt = ["isolated error evidence"] };
+    var summary = WorkflowRunSummary.Create(id, start, start.AddMinutes(3),
+        [new() { ToolId = ToolId.Maa, IsEnabled = true, Channel = 2 }, new() { ToolId = ToolId.BetterGi, IsEnabled = true }],
+        [record, record with { WorkflowRunId = Guid.NewGuid(), Message = "other-workflow" }],
+        QueueRunResult.NotAllPlannedTasksCompleted, false, "启动被阻止");
+    Assert.True(summary.Title.Contains("需要检查"), "异常标题");
+    Assert.True(summary.Body.Contains("执行异常") && summary.Body.Contains("未运行"), "异常和缺失任务");
+    Assert.True(summary.Body.Contains("3分0秒") && summary.Body.Contains("2分0秒"), "整轮墙钟和各工具耗时");
+    Assert.True(summary.Body.Contains("历史保存失败"), "持久化失败可见");
+    Assert.True(summary.Details.Contains(id.ToString()) && summary.Details.Contains("isolated error evidence"), "详情保留身份和日志");
+    Assert.False(summary.Details.Contains("other-workflow"), "隔离其他轮次");
+    return Task.CompletedTask;
+}
+
+static Task WorkflowSummarySuccessPolicyAsync()
+{
+    var id = Guid.NewGuid();
+    var now = DateTimeOffset.Now;
+    var tasks = new[] { new WorkflowTaskSetting { ToolId = ToolId.Maa, IsEnabled = true } };
+    var record = new RunRecord { ToolId = ToolId.Maa, ToolName = "MAA", StartedAt = now, EndedAt = now,
+        State = RunState.Succeeded, Message = "完成", WorkflowRunId = id };
+    var summary = WorkflowRunSummary.Create(id, now, now, tasks, [record], QueueRunResult.AllPlannedTasksCompleted, true);
+    Assert.True(summary.Title.Contains("工具任务已完成"), "仅说明工具任务完成");
+    foreach (var state in new[] { RunState.Failed, RunState.TimedOut, RunState.CompletedWithErrors, RunState.Skipped, RunState.Cancelled })
+        Assert.True(WorkflowRunSummary.Create(id, now, now, tasks, [record with { State = state }],
+            QueueRunResult.AllPlannedTasksCompleted, true).Title.Contains("需要检查"), "不因队列结果覆盖工具异常");
+    Assert.True(WorkflowRunSummary.Create(id, now, now, tasks, [], QueueRunResult.AllPlannedTasksCompleted, true).Title.Contains("需要检查"), "缺失记录不报成功");
+    Assert.True(WorkflowRunSummary.Create(id, now, now, tasks, [record], QueueRunResult.AllPlannedTasksCompleted, false).Title.Contains("需要检查"), "历史失败不报成功");
+    Assert.True(WorkflowRunSummary.Create(id, now, now, tasks,
+        [record with { State = RunState.Failed, Message = " earlier failure " }, record],
+        QueueRunResult.AllPlannedTasksCompleted, true).Body.Contains("earlier failure"), "同工具后续成功不能隐藏已有异常");
+    return Task.CompletedTask;
 }
 
 static async Task UnsafeInstallationBlocksOtherUpdatesAsync()
@@ -9672,6 +9830,19 @@ file static class CloseWindowProcessHelper
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern nint SetTimer(nint hWnd, nint nIDEvent, uint uElapse, nint lpTimerFunc);
+}
+
+file sealed class NotificationTestHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => send(request, cancellationToken);
+}
+
+file sealed class NotificationSlowContent : HttpContent
+{
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => throw new NotSupportedException();
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken) =>
+        Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+    protected override bool TryComputeLength(out long length) { length = 0; return false; }
 }
 
 file static class Assert

@@ -348,6 +348,10 @@
                     <DockPanel Margin="2,0,2,12">
                         <Button DockPanel.Dock="Right" Content="刷新记录" Width="104"
                                 Click="RefreshHistoryButton_Click" Style="{StaticResource SecondaryButton}" />
+                        <Button DockPanel.Dock="Right" Content="选中轮次详情" Margin="0,0,8,0"
+                                Click="HistoryRunDetailsButton_Click" Style="{StaticResource SecondaryButton}" />
+                        <Button x:Name="LastRunDetailsButton" DockPanel.Dock="Right" Content="本轮详情" Margin="0,0,8,0"
+                                IsEnabled="False" Click="LastRunDetailsButton_Click" Style="{StaticResource SecondaryButton}" />
                         <StackPanel>
                             <TextBlock Text="运行历史" FontSize="22" FontWeight="SemiBold" />
                         </StackPanel>
@@ -529,6 +533,34 @@
                                               KeyDown="SettingsTextInput_KeyDown"
                                               LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
                                 </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <TextBlock Text="通知" FontSize="17" FontWeight="SemiBold" />
+                                <CheckBox x:Name="NotificationsEnabledCheckBox" Content="启用 Bark 通知"
+                                          Margin="0,14,0,12" Click="SettingsToggle_Click" />
+                                <StackPanel IsEnabled="{Binding IsChecked, ElementName=NotificationsEnabledCheckBox}">
+                                    <TextBlock Text="Bark 地址（包含设备密钥）" Margin="0,0,0,6" />
+                                    <DockPanel>
+                                        <Button x:Name="TestNotificationButton" DockPanel.Dock="Right" Content="测试通知"
+                                                Margin="12,0,0,0" Click="TestNotificationButton_Click"
+                                                Style="{StaticResource SecondaryButton}" />
+                                        <PasswordBox x:Name="BarkAddressPasswordBox" Height="42" Padding="12,0"
+                                                     Background="{StaticResource InputSurfaceBrush}"
+                                                     Foreground="{StaticResource PrimaryTextBrush}"
+                                                     BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
+                                                     VerticalContentAlignment="Center" AutomationProperties.Name="Bark 地址"
+                                                     KeyDown="SettingsTextInput_KeyDown"
+                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                    </DockPanel>
+                                    <CheckBox x:Name="NotifyBeforeScheduledRunCheckBox" Content="提前 5 分钟提醒（仅定时运行）"
+                                              Margin="0,14,0,10" Click="SettingsToggle_Click" />
+                                    <CheckBox x:Name="NotifyRunStartedCheckBox" Content="开始运行通知"
+                                              Margin="0,0,0,10" Click="SettingsToggle_Click" />
+                                    <CheckBox x:Name="NotifyRunResultCheckBox" Content="结果通知" Click="SettingsToggle_Click" />
+                                </StackPanel>
                             </StackPanel>
                         </Border>
 
