@@ -5,6 +5,10 @@ namespace GachaOps.Core.Models;
 
 public sealed class AppSettings
 {
+    public bool ScheduledLaunchEnabled { get; set; }
+
+    public List<DailySchedule> DailySchedules { get; set; } = [];
+
     public string BetterGiPath { get; set; } = string.Empty;
 
     public string BetterGiMode { get; set; } = "OneDragon";
@@ -54,6 +58,9 @@ public sealed class AppSettings
 
     public void Normalize()
     {
+        DailySchedules = (DailySchedules ?? []).Where(item => item is not null && ScheduledLaunch.TryTime(item.Time, out _))
+            .Select(item => item with { Time = TimeOnly.Parse(item.Time, System.Globalization.CultureInfo.InvariantCulture).ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture) })
+            .DistinctBy(item => item.Time).OrderBy(item => item.Time).ToList();
         BarkAddress = BarkAddress?.Trim() ?? string.Empty;
         BetterGiMode = string.Equals(BetterGiMode, "ScriptGroups", StringComparison.OrdinalIgnoreCase)
             ? "ScriptGroups"

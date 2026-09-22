@@ -23,6 +23,14 @@ const string NewResourceVersion = MaaResourceTestData.NewVersion;
 const string NewerResourceVersion = MaaResourceTestData.NewerVersion;
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("每日定时设置与任意分钟选择", ScheduledLaunchTests.SettingsAsync),
+    ("定时窄窗口及跨日提醒", ScheduledLaunchTests.TimingAsync),
+    ("定时持久认领防重与时钟回拨", ScheduledLaunchTests.ClaimsAsync),
+    ("锁屏前台及忙碌准入", ScheduledLaunchTests.DesktopAsync),
+    ("任务计划程序安全定义及路径迁移", ScheduledLaunchTests.TaskXmlAsync),
+    ("隔离计划任务替身所有权与通知组合", ScheduledLaunchTests.RegistrationAsync),
+    ("定时请求向已有实例转交", ScheduledLaunchTests.PipeAsync),
+    ("定时跳过历史通知与保存失败", ScheduledLaunchTests.SkipReportAsync),
     ("Bark 设置兼容旧文件并保留独立子选择", NotificationSettingsRoundTripAsync),
     ("通知总开关及子开关均阻止请求", NotificationSwitchesGateRequestsAsync),
     ("自建 Bark 前缀与设备密钥使用 JSON 提交", BarkCustomEndpointAsync),
