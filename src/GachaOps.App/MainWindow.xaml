@@ -34,6 +34,38 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="SettingsExpanderStyle" TargetType="Expander">
+            <Setter Property="Margin" Value="0,0,0,10" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Expander">
+                        <Border Style="{StaticResource CardBorderStyle}">
+                            <StackPanel>
+                                <Border Background="{StaticResource SecondarySurfaceBrush}" CornerRadius="8" Padding="14,6">
+                                    <ToggleButton Content="{TemplateBinding Header}" FontSize="17" FontWeight="SemiBold"
+                                                  Style="{StaticResource ExpanderHeaderStyle}"
+                                                  IsChecked="{Binding IsExpanded, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />
+                                </Border>
+                                <Border x:Name="SettingsContent" Visibility="Collapsed" Padding="20,16,20,20"
+                                        BorderBrush="{StaticResource DividerBrush}" BorderThickness="0,1,0,0">
+                                    <ContentPresenter ContentSource="Content" />
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsExpanded" Value="True">
+                                <Setter TargetName="SettingsContent" Property="Visibility" Value="Visible" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style x:Key="RunStateBadgeStyle" TargetType="Border">
             <Setter Property="Width" Value="64" />
             <Setter Property="Height" Value="28" />
@@ -427,247 +459,272 @@
                 <ScrollViewer Style="{StaticResource OverlayScrollViewerStyle}"
                               VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel x:Name="SettingsControlsPanel" Margin="2,0,2,12" Focusable="True">
-                        <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
+                        <Expander Header="工具配置" Style="{StaticResource SettingsExpanderStyle}" IsExpanded="True">
                             <StackPanel>
-                                <DockPanel>
-                                    <CheckBox x:Name="UseBetterGiCheckBox" DockPanel.Dock="Right" Content="使用" HorizontalAlignment="Right"
-                                              VerticalAlignment="Center" Click="SettingsToggle_Click" />
-                                    <TextBlock Text="原神 · BetterGI" FontSize="17" FontWeight="SemiBold" />
-                                </DockPanel>
-                                <Grid Margin="0,14,0,0" IsEnabled="{Binding IsChecked, ElementName=UseBetterGiCheckBox}">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="112" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="12" />
-                                        <ColumnDefinition Width="88" />
-                                    </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="48" />
-                                        <RowDefinition Height="48" />
-                                        <RowDefinition Height="48" />
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Text="程序位置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                    <TextBox x:Name="BetterGiPathTextBox" Grid.Column="1" VerticalAlignment="Center"
-                                             KeyDown="SettingsTextInput_KeyDown"
-                                             LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                    <Button Grid.Column="3" Content="选择文件" Tag="BetterGi" Click="BrowseButton_Click"
-                                            Style="{StaticResource BrowseButton}" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Row="1" Text="运行模式" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                    <ComboBox x:Name="BetterGiModeComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
-                                              VerticalAlignment="Center" SelectionChanged="BetterGiModeComboBox_SelectionChanged">
-                                        <ComboBoxItem Content="一条龙" Tag="OneDragon" />
-                                        <ComboBoxItem Content="配置组" Tag="ScriptGroups" />
-                                    </ComboBox>
-                                    <TextBlock Grid.Row="2" Text="任务配置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                    <ComboBox x:Name="BetterGiProfileComboBox" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3"
-                                              VerticalAlignment="Center" IsEditable="False"
-                                              SelectionChanged="SettingsComboBox_SelectionChanged"
-                                              KeyDown="SettingsTextInput_KeyDown"
-                                              LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                </Grid>
-                            </StackPanel>
-                        </Border>
-
-                        <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
-                            <StackPanel>
-                                <DockPanel>
-                                    <CheckBox x:Name="UseMaaCheckBox" DockPanel.Dock="Right" Content="使用" HorizontalAlignment="Right"
-                                              VerticalAlignment="Center" Click="SettingsToggle_Click" />
-                                    <TextBlock Text="明日方舟 · MAA" FontSize="17" FontWeight="SemiBold" />
-                                </DockPanel>
-                                <Grid Margin="0,14,0,0" IsEnabled="{Binding IsChecked, ElementName=UseMaaCheckBox}">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="112" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="12" />
-                                        <ColumnDefinition Width="88" />
-                                    </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="48" />
-                                        <RowDefinition Height="48" />
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Text="程序位置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                    <TextBox x:Name="MaaPathTextBox" Grid.Column="1" VerticalAlignment="Center"
-                                             KeyDown="SettingsTextInput_KeyDown"
-                                             LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                    <Button Grid.Column="3" Content="选择文件" Tag="Maa" Click="BrowseButton_Click"
-                                            Style="{StaticResource BrowseButton}" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Row="1" Text="运行配置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                    <ComboBox x:Name="MaaProfileComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
-                                              VerticalAlignment="Center" IsEditable="False"
-                                              SelectionChanged="SettingsComboBox_SelectionChanged"
-                                              KeyDown="SettingsTextInput_KeyDown"
-                                              LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                </Grid>
-                            </StackPanel>
-                        </Border>
-
-                        <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
-                            <StackPanel>
-                                <DockPanel>
-                                    <CheckBox x:Name="UseMaaEndCheckBox" DockPanel.Dock="Right" Content="使用" HorizontalAlignment="Right"
-                                              VerticalAlignment="Center" Click="SettingsToggle_Click" />
-                                    <TextBlock Text="终末地 · MaaEnd" FontSize="17" FontWeight="SemiBold" />
-                                </DockPanel>
-                                <Grid Margin="0,14,0,0" IsEnabled="{Binding IsChecked, ElementName=UseMaaEndCheckBox}">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="112" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="12" />
-                                        <ColumnDefinition Width="88" />
-                                    </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="48" />
-                                        <RowDefinition Height="48" />
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Text="程序位置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                    <TextBox x:Name="MaaEndPathTextBox" Grid.Column="1" VerticalAlignment="Center"
-                                             KeyDown="SettingsTextInput_KeyDown"
-                                             LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                    <Button Grid.Column="3" Content="选择文件" Tag="MaaEnd" Click="BrowseButton_Click"
-                                            Style="{StaticResource BrowseButton}" VerticalAlignment="Center" />
-                                    <TextBlock Grid.Row="1" Text="运行实例" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                    <ComboBox x:Name="MaaEndInstanceComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
-                                              VerticalAlignment="Center" IsEditable="False"
-                                              SelectionChanged="SettingsComboBox_SelectionChanged"
-                                              KeyDown="SettingsTextInput_KeyDown"
-                                              LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                </Grid>
-                            </StackPanel>
-                        </Border>
-
-                        <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
-                            <StackPanel>
-                                <TextBlock Text="每日定时" FontSize="17" FontWeight="SemiBold" />
-                                <CheckBox x:Name="ScheduledLaunchCheckBox" Content="启用定时运行" Margin="0,14,0,8" Click="SettingsToggle_Click" />
-                                <DockPanel Margin="0,0,0,10">
-                                    <Button DockPanel.Dock="Right" Content="添加时刻" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}" Click="AddScheduleButton_Click" />
-                                    <StackPanel Orientation="Horizontal">
-                                        <Border x:Name="ScheduleHourErrorBorder" BorderThickness="1" CornerRadius="6">
-                                            <ComboBox x:Name="ScheduleHourComboBox" Width="80" IsEditable="True" IsTextSearchEnabled="False"
-                                                      AutomationProperties.Name="小时" />
-                                        </Border>
-                                        <TextBlock Text=":" VerticalAlignment="Center" Margin="8,0" />
-                                        <Border x:Name="ScheduleMinuteErrorBorder" BorderThickness="1" CornerRadius="6">
-                                            <ComboBox x:Name="ScheduleMinuteComboBox" Width="80" IsEditable="True" IsTextSearchEnabled="False"
-                                                      AutomationProperties.Name="分钟" />
-                                        </Border>
-                                    </StackPanel>
-                                </DockPanel>
-                                <ItemsControl x:Name="ScheduleList">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <DockPanel Margin="0,0,0,8">
-                                                <Button DockPanel.Dock="Right" Content="移除" Style="{StaticResource SecondaryButton}" Click="RemoveScheduleButton_Click" />
-                                                <CheckBox Content="{Binding Time}" IsChecked="{Binding IsEnabled, Mode=OneWay}" VerticalAlignment="Center" Click="ScheduleRowToggle_Click" />
-                                            </DockPanel>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                                <TextBlock x:Name="ScheduleStatusText" Text="正在检查定时状态" TextWrapping="Wrap" Margin="0,8,0,0" />
-                            </StackPanel>
-                        </Border>
-
-                        <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
-                            <StackPanel>
-                                <TextBlock Text="通知" FontSize="17" FontWeight="SemiBold" />
-                                <CheckBox x:Name="NotificationsEnabledCheckBox" Content="启用 Bark 通知"
-                                          Margin="0,14,0,12" Click="SettingsToggle_Click" />
-                                <StackPanel IsEnabled="{Binding IsChecked, ElementName=NotificationsEnabledCheckBox}">
-                                    <TextBlock Text="Bark 地址（包含设备密钥）" Margin="0,0,0,6" />
-                                    <DockPanel>
-                                        <Button x:Name="TestNotificationButton" DockPanel.Dock="Right" Content="测试通知"
-                                                Margin="12,0,0,0" Click="TestNotificationButton_Click"
-                                                Style="{StaticResource SecondaryButton}" />
-                                        <PasswordBox x:Name="BarkAddressPasswordBox" Height="42" Padding="12,0"
-                                                     Background="{StaticResource InputSurfaceBrush}"
-                                                     Foreground="{StaticResource PrimaryTextBrush}"
-                                                     BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
-                                                     VerticalContentAlignment="Center" AutomationProperties.Name="Bark 地址"
-                                                     KeyDown="SettingsTextInput_KeyDown"
-                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                    </DockPanel>
-                                    <CheckBox x:Name="NotifyBeforeScheduledRunCheckBox" Content="提前 5 分钟提醒（仅定时运行）"
-                                              Margin="0,14,0,10" Click="SettingsToggle_Click" />
-                                    <CheckBox x:Name="NotifyRunStartedCheckBox" Content="定时开始通知"
-                                              Margin="0,0,0,10" Click="SettingsToggle_Click" />
-                                    <CheckBox x:Name="NotifyRunResultCheckBox" Content="结果通知" Click="SettingsToggle_Click" />
-                                </StackPanel>
-                            </StackPanel>
-                        </Border>
-
-                        <Border Padding="20" Margin="0,0,0,12" Style="{StaticResource CardBorderStyle}">
-                            <StackPanel>
-                                <TextBlock Text="启动与结束" FontSize="17" FontWeight="SemiBold" />
-                                <Grid Margin="0,14,0,0">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <Grid.RowDefinitions>
-                                        <RowDefinition Height="44" />
-                                        <RowDefinition Height="44" />
-                                        <RowDefinition Height="44" />
-                                        <RowDefinition Height="44" />
-                                    </Grid.RowDefinitions>
-                                    <TextBlock Text="启动后最小化" VerticalAlignment="Center" />
-                                    <CheckBox x:Name="MinimizeOnStartupCheckBox" Grid.Column="1"
-                                              VerticalAlignment="Center" HorizontalAlignment="Right"
-                                              Style="{StaticResource ToggleSwitchCheckBoxStyle}"
-                                              Click="SettingsToggle_Click" />
-                                    <TextBlock Grid.Row="1" Text="启动后运行已启用任务" VerticalAlignment="Center" />
-                                    <CheckBox x:Name="RunWorkflowOnStartupCheckBox" Grid.Row="1" Grid.Column="1"
-                                              VerticalAlignment="Center" HorizontalAlignment="Right"
-                                              Style="{StaticResource ToggleSwitchCheckBoxStyle}"
-                                              Click="SettingsToggle_Click" />
-                                    <TextBlock Grid.Row="2" Text="任务队列结束后退出 GachaOps" VerticalAlignment="Center" />
-                                    <CheckBox x:Name="ExitAfterWorkflowCompletesCheckBox" Grid.Row="2" Grid.Column="1"
-                                              VerticalAlignment="Center" HorizontalAlignment="Right"
-                                              Style="{StaticResource ToggleSwitchCheckBoxStyle}"
-                                              Click="SettingsToggle_Click" />
-                                    <TextBlock Grid.Row="3" Text="启动前自动更新工具" VerticalAlignment="Center" />
-                                    <CheckBox x:Name="UpdateToolsBeforeLaunchCheckBox" Grid.Row="3" Grid.Column="1"
-                                              VerticalAlignment="Center" HorizontalAlignment="Right"
-                                              Style="{StaticResource ToggleSwitchCheckBoxStyle}"
-                                              Click="SettingsToggle_Click" />
-                                </Grid>
-                            </StackPanel>
-                        </Border>
-
-                        <Grid Margin="0,0,0,14">
-                            <Border Padding="20" Style="{StaticResource CardBorderStyle}">
                                 <StackPanel>
-                                    <TextBlock Text="超时保护" FontSize="17" FontWeight="SemiBold" />
-                                    <Grid Margin="0,14,0,0">
+                                    <DockPanel>
+                                        <CheckBox x:Name="UseBetterGiCheckBox" DockPanel.Dock="Right" Content="使用" HorizontalAlignment="Right"
+                                                  VerticalAlignment="Center" Click="SettingsToggle_Click" />
+                                        <TextBlock Text="原神 · BetterGI" FontSize="17" FontWeight="SemiBold" />
+                                    </DockPanel>
+                                    <Grid Margin="0,14,0,0" IsEnabled="{Binding IsChecked, ElementName=UseBetterGiCheckBox}">
                                         <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
                                             <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="120" />
+                                            <ColumnDefinition Width="12" />
+                                            <ColumnDefinition Width="88" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="程序位置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="BetterGiPathTextBox" Grid.Column="1" VerticalAlignment="Center"
+                                                 KeyDown="SettingsTextInput_KeyDown"
+                                                 LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <Button Grid.Column="3" Content="选择文件" Tag="BetterGi" Click="BrowseButton_Click"
+                                                Style="{StaticResource BrowseButton}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Row="1" Text="运行模式" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <ComboBox x:Name="BetterGiModeComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
+                                                  VerticalAlignment="Center" SelectionChanged="BetterGiModeComboBox_SelectionChanged">
+                                            <ComboBoxItem Content="一条龙" Tag="OneDragon" />
+                                            <ComboBoxItem Content="配置组" Tag="ScriptGroups" />
+                                        </ComboBox>
+                                        <TextBlock Grid.Row="2" Text="任务配置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <ComboBox x:Name="BetterGiProfileComboBox" Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3"
+                                                  VerticalAlignment="Center" IsEditable="False"
+                                                  SelectionChanged="SettingsComboBox_SelectionChanged"
+                                                  KeyDown="SettingsTextInput_KeyDown"
+                                                  LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                    </Grid>
+                                </StackPanel>
+                                <Border Height="1" Background="{StaticResource DividerBrush}" Margin="0,18" />
+                                <StackPanel>
+                                    <DockPanel>
+                                        <CheckBox x:Name="UseMaaCheckBox" DockPanel.Dock="Right" Content="使用" HorizontalAlignment="Right"
+                                                  VerticalAlignment="Center" Click="SettingsToggle_Click" />
+                                        <TextBlock Text="明日方舟 · MAA" FontSize="17" FontWeight="SemiBold" />
+                                    </DockPanel>
+                                    <Grid Margin="0,14,0,0" IsEnabled="{Binding IsChecked, ElementName=UseMaaCheckBox}">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="12" />
+                                            <ColumnDefinition Width="88" />
                                         </Grid.ColumnDefinitions>
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="48" />
                                             <RowDefinition Height="48" />
                                         </Grid.RowDefinitions>
-                                        <TextBlock Text="没有新日志（分钟）" VerticalAlignment="Center"
-                                                   Foreground="{StaticResource MutedTextBrush}" />
-                                        <TextBox x:Name="NoLogTimeoutTextBox" Grid.Column="1" VerticalAlignment="Center"
+                                        <TextBlock Text="程序位置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="MaaPathTextBox" Grid.Column="1" VerticalAlignment="Center"
                                                  KeyDown="SettingsTextInput_KeyDown"
                                                  LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                        <TextBlock Grid.Row="1" Text="单项最长运行（分钟）" VerticalAlignment="Center"
-                                                   Foreground="{StaticResource MutedTextBrush}" />
-                                        <TextBox x:Name="HardTimeoutTextBox" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
-                                                 KeyDown="SettingsTextInput_KeyDown"
-                                                 LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <Button Grid.Column="3" Content="选择文件" Tag="Maa" Click="BrowseButton_Click"
+                                                Style="{StaticResource BrowseButton}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Row="1" Text="运行配置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <ComboBox x:Name="MaaProfileComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
+                                                  VerticalAlignment="Center" IsEditable="False"
+                                                  SelectionChanged="SettingsComboBox_SelectionChanged"
+                                                  KeyDown="SettingsTextInput_KeyDown"
+                                                  LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
                                     </Grid>
                                 </StackPanel>
-                            </Border>
-                        </Grid>
+                                <Border Height="1" Background="{StaticResource DividerBrush}" Margin="0,18" />
+                                <StackPanel>
+                                    <DockPanel>
+                                        <CheckBox x:Name="UseMaaEndCheckBox" DockPanel.Dock="Right" Content="使用" HorizontalAlignment="Right"
+                                                  VerticalAlignment="Center" Click="SettingsToggle_Click" />
+                                        <TextBlock Text="终末地 · MaaEnd" FontSize="17" FontWeight="SemiBold" />
+                                    </DockPanel>
+                                    <Grid Margin="0,14,0,0" IsEnabled="{Binding IsChecked, ElementName=UseMaaEndCheckBox}">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="12" />
+                                            <ColumnDefinition Width="88" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="程序位置" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="MaaEndPathTextBox" Grid.Column="1" VerticalAlignment="Center"
+                                                 KeyDown="SettingsTextInput_KeyDown"
+                                                 LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <Button Grid.Column="3" Content="选择文件" Tag="MaaEnd" Click="BrowseButton_Click"
+                                                Style="{StaticResource BrowseButton}" VerticalAlignment="Center" />
+                                        <TextBlock Grid.Row="1" Text="运行实例" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <ComboBox x:Name="MaaEndInstanceComboBox" Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3"
+                                                  VerticalAlignment="Center" IsEditable="False"
+                                                  SelectionChanged="SettingsComboBox_SelectionChanged"
+                                                  KeyDown="SettingsTextInput_KeyDown"
+                                                  LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                    </Grid>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,18,0,0">
+                                    <Button Content="重新扫描配置" Width="136" Click="RefreshProfilesButton_Click"
+                                            Style="{StaticResource SecondaryButton}" />
+                                    <Button Content="连接检查" Width="112" Margin="10,0,0,0"
+                                            Click="ValidateButton_Click" Style="{StaticResource SecondaryButton}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Expander>
 
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button Content="重新扫描配置" Width="136" Click="RefreshProfilesButton_Click"
-                                    Style="{StaticResource SecondaryButton}" />
-                            <Button Content="连接检查" Width="112" Margin="10,0,0,0"
-                                    Click="ValidateButton_Click" Style="{StaticResource SecondaryButton}" />
-                        </StackPanel>
+                        <Expander Header="定时运行" Style="{StaticResource SettingsExpanderStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="112" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="44" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="启用定时" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <CheckBox x:Name="ScheduledLaunchCheckBox" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="启用定时运行" Click="SettingsToggle_Click" />
+                                <TextBlock Grid.Row="1" Text="每日时刻" Margin="0,18,0,0" Foreground="{StaticResource MutedTextBrush}" />
+                                <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,8,0,0">
+                                    <DockPanel Margin="0,0,0,10">
+                                        <Button DockPanel.Dock="Right" Content="添加时刻" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}" Click="AddScheduleButton_Click" />
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border x:Name="ScheduleHourErrorBorder" BorderThickness="1" CornerRadius="6">
+                                                <ComboBox x:Name="ScheduleHourComboBox" Width="80" IsEditable="True" IsTextSearchEnabled="False"
+                                                          AutomationProperties.Name="小时" />
+                                            </Border>
+                                            <TextBlock Text=":" VerticalAlignment="Center" Margin="8,0" />
+                                            <Border x:Name="ScheduleMinuteErrorBorder" BorderThickness="1" CornerRadius="6">
+                                                <ComboBox x:Name="ScheduleMinuteComboBox" Width="80" IsEditable="True" IsTextSearchEnabled="False"
+                                                          AutomationProperties.Name="分钟" />
+                                            </Border>
+                                        </StackPanel>
+                                    </DockPanel>
+                                    <ItemsControl x:Name="ScheduleList">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <DockPanel Margin="0,0,0,8">
+                                                    <Button DockPanel.Dock="Right" Content="移除" Style="{StaticResource SecondaryButton}" Click="RemoveScheduleButton_Click" />
+                                                    <CheckBox Content="{Binding Time}" IsChecked="{Binding IsEnabled, Mode=OneWay}" VerticalAlignment="Center" Click="ScheduleRowToggle_Click" />
+                                                </DockPanel>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock x:Name="ScheduleStatusText" Text="正在检查定时状态" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                </StackPanel>
+                            </Grid>
+                        </Expander>
+
+                        <Expander Header="外部通知" Style="{StaticResource SettingsExpanderStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="112" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="44" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="启用通知" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <CheckBox x:Name="NotificationsEnabledCheckBox" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="启用 Bark 通知" Click="SettingsToggle_Click" />
+                                <Grid Grid.Row="1" Grid.ColumnSpan="2" IsEnabled="{Binding IsChecked, ElementName=NotificationsEnabledCheckBox}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="112" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+                                    <TextBlock Text="通知时机" Margin="0,12,0,0" Foreground="{StaticResource MutedTextBrush}" />
+                                    <StackPanel Grid.Column="1" Margin="0,12,0,6">
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                                            <CheckBox x:Name="NotifyBeforeScheduledRunCheckBox" Content="定时提醒" AutomationProperties.Name="提前 5 分钟提醒，仅定时运行" Click="SettingsToggle_Click" />
+                                            <TextBlock Text="提前 5 分钟" Margin="16,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                                            <CheckBox x:Name="NotifyRunStartedCheckBox" Content="开始通知" AutomationProperties.Name="定时开始通知" Click="SettingsToggle_Click" />
+                                            <TextBlock Text="仅定时运行" Margin="16,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        </StackPanel>
+                                        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                                            <CheckBox x:Name="NotifyRunResultCheckBox" Content="结果通知" AutomationProperties.Name="整轮结果通知" Click="SettingsToggle_Click" />
+                                            <TextBlock Text="整轮汇总" Margin="16,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <TextBlock Grid.Row="1" Text="推送地址" Margin="0,12,0,0" Foreground="{StaticResource MutedTextBrush}" />
+                                    <StackPanel Grid.Row="1" Grid.Column="1">
+                                        <DockPanel>
+                                            <Button x:Name="TestNotificationButton" DockPanel.Dock="Right" Content="测试通知"
+                                                    Margin="12,0,0,0" Click="TestNotificationButton_Click"
+                                                    Style="{StaticResource SecondaryButton}" />
+                                            <PasswordBox x:Name="BarkAddressPasswordBox" Height="42" Padding="12,0"
+                                                         Background="{StaticResource InputSurfaceBrush}"
+                                                         Foreground="{StaticResource PrimaryTextBrush}"
+                                                         BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
+                                                         VerticalContentAlignment="Center" AutomationProperties.Name="Bark 地址，包含设备密钥"
+                                                         KeyDown="SettingsTextInput_KeyDown"
+                                                         LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        </DockPanel>
+                                        <TextBlock Text="完整 Bark 地址，包含设备密钥" Margin="0,6,0,0" Foreground="{StaticResource MutedTextBrush}" />
+                                    </StackPanel>
+                                </Grid>
+                            </Grid>
+                        </Expander>
+
+                        <Expander Header="运行设置" Style="{StaticResource SettingsExpanderStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="112" />
+                                    <ColumnDefinition Width="38" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="44" />
+                                    <RowDefinition Height="44" />
+                                    <RowDefinition Height="44" />
+                                    <RowDefinition Height="44" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="启动最小化" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <CheckBox x:Name="MinimizeOnStartupCheckBox" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="启动后最小化" Click="SettingsToggle_Click" />
+                                <TextBlock Grid.Row="1" Text="启动运行" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <CheckBox x:Name="RunWorkflowOnStartupCheckBox" Grid.Row="1" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="启动后运行已启用任务" Click="SettingsToggle_Click" />
+                                <TextBlock Grid.Row="1" Grid.Column="2" Text="运行已启用任务" Margin="16,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="2" Text="结束退出" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <CheckBox x:Name="ExitAfterWorkflowCompletesCheckBox" Grid.Row="2" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="任务队列结束后退出 GachaOps" Click="SettingsToggle_Click" />
+                                <TextBlock Grid.Row="2" Grid.Column="2" Text="任务队列结束后退出 GachaOps" Margin="16,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="3" Text="工具更新" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <CheckBox x:Name="UpdateToolsBeforeLaunchCheckBox" Grid.Row="3" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="启动前自动更新工具" Click="SettingsToggle_Click" />
+                                <TextBlock Grid.Row="3" Grid.Column="2" Text="启动前自动更新" Margin="16,0,0,0" VerticalAlignment="Center" />
+                            </Grid>
+                        </Expander>
+
+                        <Expander Header="超时保护" Style="{StaticResource SettingsExpanderStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="112" />
+                                    <ColumnDefinition Width="120" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="48" />
+                                    <RowDefinition Height="48" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Grid.Row="0" Text="日志超时" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBox x:Name="NoLogTimeoutTextBox" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center" AutomationProperties.Name="没有新日志的超时时间，分钟"
+                                         KeyDown="SettingsTextInput_KeyDown" LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                <TextBlock Grid.Row="0" Grid.Column="2" Text="分钟内没有新日志" Margin="12,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="1" Text="运行上限" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <TextBox x:Name="HardTimeoutTextBox" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center" AutomationProperties.Name="单项最长运行时间，分钟"
+                                         KeyDown="SettingsTextInput_KeyDown" LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                <TextBlock Grid.Row="1" Grid.Column="2" Text="分钟，单项最长运行" Margin="12,0,0,0" VerticalAlignment="Center" />
+                            </Grid>
+                        </Expander>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
