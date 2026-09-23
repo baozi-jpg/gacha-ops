@@ -36,6 +36,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("自建 Bark 前缀与设备密钥使用 JSON 提交", BarkCustomEndpointAsync),
     ("Bark 失败与响应原文均不泄漏密钥", BarkFailuresAreSanitizedAsync),
     ("Bark 超时包含响应正文且取消有界", BarkTimeoutAndCancellationAsync),
+    ("通知结果日志脱敏及写入失败隔离", NotificationJournalAsync),
     ("整轮汇总隔离身份并保留异常和日志", WorkflowSummaryIncludesFailuresAsync),
     ("整轮成功与缺失任务历史失败准确区分", WorkflowSummarySuccessPolicyAsync),
     ("联网失败后安装不安全时不启动其他更新", UnsafeInstallationBlocksOtherUpdatesAsync),
@@ -381,10 +382,17 @@ static async Task BarkFailuresAreSanitizedAsync()
         var result = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
         Assert.False(result.Sent, "错误不能报成功");
         Assert.False(result.Error!.Contains(secret), "不输出响应原文");
+        if (content.StartsWith("broken", StringComparison.Ordinal))
+            Assert.Equal("Bark 响应不是有效的 JSON", result.Error, "解析失败独立分类");
     }
     using var failureClient = new HttpClient(new NotificationTestHandler((_, _) => throw new HttpRequestException(secret)));
     var failed = await new BarkNotificationService(failureClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
     Assert.False(failed.Error!.Contains(secret), "异常不泄漏密钥");
+    Assert.True(failed.Error.Contains("HTTP 请求失败"), "请求异常需要与响应解析失败区分");
+    using var dnsClient = new HttpClient(new NotificationTestHandler((_, _) =>
+        throw new HttpRequestException(HttpRequestError.NameResolutionError, secret)));
+    var dnsFailure = await new BarkNotificationService(dnsClient).SendAsync(settings, RunNotificationKind.Reminder, "提醒", "内容");
+    Assert.True(dnsFailure.Error!.Contains("NameResolutionError"), "保留脱敏的网络错误分类");
     using var rejectedClient = new HttpClient(new NotificationTestHandler((_, _) => Task.FromResult(
         new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent(secret) })));
     var rejected = await new BarkNotificationService(rejectedClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
@@ -412,6 +420,27 @@ static async Task BarkTimeoutAndCancellationAsync()
     Assert.Equal("通知发送已取消", cancelled.Error, "关闭时取消发送");
 }
 
+static async Task NotificationJournalAsync()
+{
+    using var area = TestArea.Create();
+    const string secret = "private-device-key";
+    var settings = new AppSettings { NotificationsEnabled = true, BarkAddress = "https://bark.invalid/" + secret };
+    using var client = new HttpClient(new NotificationTestHandler((_, _) =>
+        throw new HttpRequestException(HttpRequestError.NameResolutionError, secret)));
+    var delivery = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Reminder, secret, secret);
+    BarkNotificationService.RecordDelivery(RunNotificationKind.Reminder, delivery, area.Root, "08:00");
+    var journal = await File.ReadAllTextAsync(area.File("notifications.jsonl"));
+    using var entry = JsonDocument.Parse(journal);
+    Assert.Equal("发送失败", entry.RootElement.GetProperty("Outcome").GetString(), "错误不会伪装成接收成功");
+    Assert.Equal("Reminder", entry.RootElement.GetProperty("Kind").GetString(), "提醒和结果可以区分");
+    Assert.True(entry.RootElement.GetProperty("Reason").GetString()!.Contains("NameResolutionError"), "安全错误分类保留");
+    Assert.False(journal.Contains(secret) || journal.Contains("bark.invalid"), "日志不记录地址密钥或正文");
+    Assert.False((await File.ReadAllTextAsync(area.File("crashes/crash.jsonl"))).Contains(secret), "诊断日志同样脱敏");
+    var blockedRoot = area.File("blocked");
+    await File.WriteAllTextAsync(blockedRoot, "occupied");
+    BarkNotificationService.RecordDelivery(RunNotificationKind.Result, new(true), blockedRoot);
+}
+
 static Task WorkflowSummaryIncludesFailuresAsync()
 {
     var id = Guid.NewGuid();
@@ -427,6 +456,7 @@ static Task WorkflowSummaryIncludesFailuresAsync()
     Assert.True(summary.Body.Contains("执行异常") && summary.Body.Contains("未运行"), "异常和缺失任务");
     Assert.True(summary.Body.Contains("3分0秒") && summary.Body.Contains("2分0秒"), "整轮墙钟和各工具耗时");
     Assert.True(summary.Body.Contains("历史保存失败"), "持久化失败可见");
+    Assert.False(summary.Body.Contains("轮次") || summary.Body.Contains("在 GachaOps 查看"), "通知不显示轮次码或详情引导");
     Assert.True(summary.Details.Contains(id.ToString()) && summary.Details.Contains("isolated error evidence"), "详情保留身份和日志");
     Assert.False(summary.Details.Contains("other-workflow"), "隔离其他轮次");
     return Task.CompletedTask;

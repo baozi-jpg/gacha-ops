@@ -34,7 +34,6 @@ public sealed record WorkflowRunSummary(Guid WorkflowRunId, string Title, string
         }
         foreach (var warning in warnings ?? []) body.AppendLine($"{ToolCatalog.Get(warning.ToolId).Name}：{Compact(warning.Message)}");
         if (!historyPersisted) body.AppendLine("历史保存失败，请在本次窗口查看本轮详情");
-        body.Append($"轮次 {workflowRunId.ToString("N")[..8]} · 在 GachaOps 查看本轮详情或历史");
 
         var details = new StringBuilder(body.ToString());
         details.AppendLine().AppendLine($"工作流 ID：{workflowRunId}");
@@ -46,7 +45,7 @@ public sealed record WorkflowRunSummary(Guid WorkflowRunId, string Title, string
             if (record.LogExcerpt.Count > 0)
                 details.AppendLine("日志摘录：").AppendLine(string.Join(Environment.NewLine, record.LogExcerpt));
         }
-        return new(workflowRunId, title, body.ToString(), details.ToString());
+        return new(workflowRunId, title, body.ToString().TrimEnd(), details.ToString());
     }
 
     private static string State(RunState state) => state switch

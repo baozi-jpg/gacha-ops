@@ -15,7 +15,7 @@ public static class ScheduledLaunch
         .Select(index => TimeOnly.MinValue.AddMinutes(index * 15).ToString("HH:mm", CultureInfo.InvariantCulture)).ToArray();
 
     public static bool TryTime(string? text, out TimeOnly time) => TimeOnly.TryParseExact(
-        text, ["H:mm", "HH:mm"], CultureInfo.InvariantCulture, DateTimeStyles.None, out time);
+        text, ["H:m", "H:mm", "HH:m", "HH:mm"], CultureInfo.InvariantCulture, DateTimeStyles.None, out time);
 
     public static ScheduledRequest? Parse(string[] args, DateTimeOffset now) =>
         args.Length == 2 && args[0] is "--scheduled-run" or "--scheduled-reminder"

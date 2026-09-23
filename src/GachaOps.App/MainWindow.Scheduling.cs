@@ -29,23 +29,39 @@ public partial class MainWindow
 
     private void InitializeScheduleControls()
     {
-        ScheduleTimeComboBox.ItemsSource = ScheduledLaunch.TimeChoices;
-        ScheduleTimeComboBox.Text = "08:00";
+        ScheduleHourComboBox.ItemsSource = Enumerable.Range(0, 24).Select(hour => hour.ToString("D2"));
+        ScheduleMinuteComboBox.ItemsSource = new[] { "00", "15", "30", "45" };
+        ScheduleHourComboBox.Text = "08";
+        ScheduleMinuteComboBox.Text = "00";
         ScheduleList.ItemsSource = _scheduleRows;
         ScheduledLaunchCheckBox.IsChecked = _settings.ScheduledLaunchEnabled;
         foreach (var item in _settings.DailySchedules) _scheduleRows.Add(item);
-        ScheduleTimeZoneText.Text = $"本机时间 · {TimeZoneInfo.Local.DisplayName}";
     }
 
     private async void AddScheduleButton_Click(object sender, RoutedEventArgs e)
     {
-        if (!ScheduledLaunch.TryTime(ScheduleTimeComboBox.Text, out var time))
+        ScheduleHourErrorBorder.ClearValue(Border.BorderBrushProperty);
+        ScheduleMinuteErrorBorder.ClearValue(Border.BorderBrushProperty);
+        var hourValid = ScheduledLaunch.TryTime($"{ScheduleHourComboBox.Text}:00", out _);
+        var minuteValid = ScheduledLaunch.TryTime($"00:{ScheduleMinuteComboBox.Text}", out _);
+        if (!hourValid || !minuteValid)
         {
-            ScheduleStatusText.Text = "请输入有效的时:分，例如 08:17";
+            var invalid = !hourValid ? ScheduleHourComboBox : ScheduleMinuteComboBox;
+            if (!hourValid) ScheduleHourErrorBorder.BorderBrush = System.Windows.Media.Brushes.Crimson;
+            if (!minuteValid) ScheduleMinuteErrorBorder.BorderBrush = System.Windows.Media.Brushes.Crimson;
+            ScheduleStatusText.Text = !hourValid ? "小时请输入 0–23" : "分钟请输入 0–59";
+            invalid.Focus();
             return;
         }
+        if (!ScheduledLaunch.TryTime($"{ScheduleHourComboBox.Text}:{ScheduleMinuteComboBox.Text}", out var time)) return;
+        ScheduleHourComboBox.Text = time.Hour.ToString("D2");
+        ScheduleMinuteComboBox.Text = time.Minute.ToString("D2");
         var text = time.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
-        if (_scheduleRows.Any(item => item.Time == text)) return;
+        if (_scheduleRows.Any(item => item.Time == text))
+        {
+            ScheduleStatusText.Text = "该时刻已添加";
+            return;
+        }
         _scheduleRows.Add(new(text));
         await SaveSettingsFromControlsAsync();
     }

@@ -628,12 +628,14 @@ public partial class MainWindow : Window
         string? summaryReason = null;
         string? completionWarning = null;
         var startNotified = 0;
+        var cancelledByUser = false;
         Task startNotification = Task.CompletedTask;
         void NotifyActualStart(ToolStatusUpdate update)
         {
-            if (update.State == RunState.Running && Interlocked.CompareExchange(ref startNotified, 1, 0) == 0)
+            if (scheduledRequest is not null && update.State == RunState.Running
+                && Interlocked.CompareExchange(ref startNotified, 1, 0) == 0)
                 startNotification = SendNotificationAsync(settingsForRun, RunNotificationKind.Started,
-                    "GachaOps · 开始运行", $"开始执行 {string.Join("、", workflowTasks.Select(task => ToolCatalog.Get(task.ToolId).Name))}");
+                    "GachaOps · 开始运行", $"开始执行 {string.Join("、", workflowTasks.Select(task => ToolCatalog.Get(task.ToolId).Name))}", scheduledRequest.Time);
         }
         _queue.StatusChanged += NotifyActualStart;
         IReadOnlyList<ToolPreparationWarning> updateWarnings = [];
@@ -686,6 +688,7 @@ public partial class MainWindow : Window
 
             if (preparation.Cancelled)
             {
+                cancelledByUser = true;
                 summaryReason = "已取消本次启动";
                 historyPersisted = await WaitForHistoryWritesAsync();
                 SetFooter(!historyPersisted ? "已取消本次启动，且历史保存失败"
@@ -707,6 +710,7 @@ public partial class MainWindow : Window
             if (preparation.RunnableTasks.Count > 0
                 && startedAutomatically && scheduledRequest is null && !await WaitForStartupRunDelayAsync())
             {
+                cancelledByUser = true;
                 summaryReason = "已取消本次自动运行";
                 historyPersisted = await WaitForHistoryWritesAsync();
                 SetFooter("已取消本次自动运行", Color.FromRgb(255, 159, 10));
@@ -759,6 +763,7 @@ public partial class MainWindow : Window
         }
         catch (OperationCanceledException)
         {
+            cancelledByUser = true;
             summaryReason = "本轮已取消";
             // Closing GachaOps stops monitoring only; adapters never kill the external process.
         }
@@ -792,8 +797,12 @@ public partial class MainWindow : Window
             _lastRunSummary = WorkflowRunSummary.Create(workflowRunId, startedAt, endedAt,
                 workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings);
             LastRunDetailsButton.IsEnabled = true;
-            await SendNotificationAsync(settingsForRun, RunNotificationKind.Result,
-                _lastRunSummary.Title, _lastRunSummary.Body);
+            if (!cancelledByUser && !_stopAfterCurrentRequested)
+                await SendNotificationAsync(settingsForRun, RunNotificationKind.Result,
+                    _lastRunSummary.Title, _lastRunSummary.Body, scheduledRequest?.Time);
+            else
+                BarkNotificationService.RecordDelivery(RunNotificationKind.Result,
+                    new(false, SkippedReason: "用户主动取消或停止"), DataRoot, scheduledRequest?.Time);
             HideToolUpdateOverlay();
             _isPreparing = false;
             _preparationCancellation = null;
@@ -1672,12 +1681,11 @@ public partial class MainWindow : Window
     private async void RefreshHistoryButton_Click(object sender, RoutedEventArgs e) => await RefreshHistoryAsync();
 
     private async Task<NotificationDeliveryResult> SendNotificationAsync(AppSettings settings,
-        RunNotificationKind kind, string title, string body)
+        RunNotificationKind kind, string title, string body, string? scheduledTime = null)
     {
         if (_isClosing) return new(false);
         var result = await _notifications.SendAsync(settings, kind, title, body, _appCancellation.Token);
-        if (result.Error is { } error)
-            _crashLogStore.TryWrite("BarkNotification", new InvalidOperationException(error));
+        BarkNotificationService.RecordDelivery(kind, result, DataRoot, scheduledTime);
         return result;
     }
 
