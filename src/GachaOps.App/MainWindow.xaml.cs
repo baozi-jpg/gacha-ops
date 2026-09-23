@@ -22,7 +22,7 @@ public partial class MainWindow : Window
     private readonly HistoryStore _historyStore = new();
     private readonly CrashLogStore _crashLogStore = new();
     private readonly AutomationQueueService _queue = new();
-    private readonly BarkNotificationService _notifications = new();
+    private readonly NotificationService _notifications = new();
     private WorkflowRunSummary? _lastRunSummary;
     private readonly Dictionary<ToolId, IAutomationAdapter> _adapters;
     private readonly ToolUpdateCoordinator _toolUpdateCoordinator;
@@ -801,7 +801,7 @@ public partial class MainWindow : Window
                 await SendNotificationAsync(settingsForRun, RunNotificationKind.Result,
                     _lastRunSummary.Title, _lastRunSummary.Body, scheduledRequest?.Time);
             else
-                BarkNotificationService.RecordDelivery(RunNotificationKind.Result,
+                NotificationService.RecordDelivery(RunNotificationKind.Result,
                     new(false, SkippedReason: "用户主动取消或停止"), DataRoot, scheduledRequest?.Time);
             HideToolUpdateOverlay();
             _isPreparing = false;
@@ -1035,7 +1035,8 @@ public partial class MainWindow : Window
                && left.NotifyBeforeScheduledRun == right.NotifyBeforeScheduledRun
                && left.NotifyRunStarted == right.NotifyRunStarted
                && left.NotifyRunResult == right.NotifyRunResult
-               && string.Equals(left.BarkAddress, right.BarkAddress, StringComparison.Ordinal)
+               && left.Bark == right.Bark
+               && left.Ntfy == right.Ntfy
                && left.NoLogTimeoutMinutes == right.NoLogTimeoutMinutes
                && left.HardTimeoutMinutes == right.HardTimeoutMinutes
                && (left.WorkflowTasks ?? []).SequenceEqual(right.WorkflowTasks ?? []);
@@ -1072,7 +1073,19 @@ public partial class MainWindow : Window
             NotifyBeforeScheduledRun = NotifyBeforeScheduledRunCheckBox.IsChecked == true,
             NotifyRunStarted = NotifyRunStartedCheckBox.IsChecked == true,
             NotifyRunResult = NotifyRunResultCheckBox.IsChecked == true,
-            BarkAddress = BarkAddressPasswordBox.Password.Trim(),
+            Bark = BarkChannelPanel.Visibility == Visibility.Visible ? new()
+            {
+                IsEnabled = BarkEnabledCheckBox.IsChecked == true,
+                ServerAddress = BarkServerTextBox.Text,
+                DeviceKey = BarkDeviceKeyPasswordBox.Password
+            } : null,
+            Ntfy = NtfyChannelPanel.Visibility == Visibility.Visible ? new()
+            {
+                IsEnabled = NtfyEnabledCheckBox.IsChecked == true,
+                ServerAddress = NtfyServerTextBox.Text,
+                Topic = NtfyTopicTextBox.Text,
+                AccessToken = NtfyTokenPasswordBox.Password
+            } : null,
             WorkflowTasks = ReadSelectedWorkflow(),
             NoLogTimeoutMinutes = noLogMinutes,
             HardTimeoutMinutes = hardMinutes
@@ -1187,7 +1200,7 @@ public partial class MainWindow : Window
         NotifyBeforeScheduledRunCheckBox.IsChecked = _settings.NotifyBeforeScheduledRun;
         NotifyRunStartedCheckBox.IsChecked = _settings.NotifyRunStarted;
         NotifyRunResultCheckBox.IsChecked = _settings.NotifyRunResult;
-        BarkAddressPasswordBox.Password = _settings.BarkAddress;
+        LoadNotificationChannels();
         NoLogTimeoutTextBox.Text = _settings.NoLogTimeoutMinutes.ToString();
         HardTimeoutTextBox.Text = _settings.HardTimeoutMinutes.ToString();
         _workflow.Load(_settings.WorkflowTasks!, _settings);
@@ -1685,7 +1698,7 @@ public partial class MainWindow : Window
     {
         if (_isClosing) return new(false);
         var result = await _notifications.SendAsync(settings, kind, title, body, _appCancellation.Token);
-        BarkNotificationService.RecordDelivery(kind, result, DataRoot, scheduledTime);
+        NotificationService.RecordDelivery(kind, result, DataRoot, scheduledTime);
         return result;
     }
 
@@ -1701,18 +1714,79 @@ public partial class MainWindow : Window
 
     private async void TestNotificationButton_Click(object sender, RoutedEventArgs e)
     {
-        TestNotificationButton.IsEnabled = false;
+        if (sender is not Button button || !Enum.TryParse<NotificationChannel>(button.Tag as string, out var channel)) return;
+        button.IsEnabled = false;
         try
         {
             var settings = await SaveSettingsFromControlsAsync();
             if (settings is null) return;
-            var result = await SendNotificationAsync(settings, RunNotificationKind.Test,
-                "GachaOps · 测试通知", "Bark 通知测试，请确认手机是否收到。");
+            var name = channel == NotificationChannel.Bark ? "Bark" : "ntfy";
+            var result = await _notifications.SendAsync(settings, RunNotificationKind.Test,
+                "GachaOps · 测试通知", $"{name} 通知测试，请确认手机是否收到。", _appCancellation.Token, channel);
+            NotificationService.RecordDelivery(RunNotificationKind.Test, result, DataRoot);
             if (!_isClosing)
-                AppDialog.ShowModal(this, "测试通知", result.Sent ? "Bark 服务已接收，请检查手机。"
-                    : result.Error ?? "请先启用通知。", result.Sent ? AppDialogKind.Information : AppDialogKind.Warning);
+                AppDialog.ShowModal(this, "测试通知", result.Sent ? $"{name} 服务已接收，请检查手机。"
+                    : result.Error ?? result.SkippedReason ?? "请先启用通知。", result.Sent ? AppDialogKind.Information : AppDialogKind.Warning);
         }
-        finally { TestNotificationButton.IsEnabled = true; }
+        finally { button.IsEnabled = true; }
+    }
+
+    private void LoadNotificationChannels()
+    {
+        BarkChannelPanel.Visibility = _settings.Bark is null ? Visibility.Collapsed : Visibility.Visible;
+        BarkEnabledCheckBox.IsChecked = _settings.Bark?.IsEnabled ?? true;
+        BarkServerTextBox.Text = _settings.Bark?.ServerAddress ?? "https://api.day.app";
+        BarkDeviceKeyPasswordBox.Password = _settings.Bark?.DeviceKey ?? string.Empty;
+        NtfyChannelPanel.Visibility = _settings.Ntfy is null ? Visibility.Collapsed : Visibility.Visible;
+        NtfyEnabledCheckBox.IsChecked = _settings.Ntfy?.IsEnabled ?? true;
+        NtfyServerTextBox.Text = _settings.Ntfy?.ServerAddress ?? "https://ntfy.sh";
+        NtfyTopicTextBox.Text = _settings.Ntfy?.Topic ?? string.Empty;
+        NtfyTokenPasswordBox.Password = _settings.Ntfy?.AccessToken ?? string.Empty;
+        RefreshNotificationChannelChoices();
+    }
+
+    private void RefreshNotificationChannelChoices()
+    {
+        AddBarkChannelItem.IsEnabled = BarkChannelPanel.Visibility != Visibility.Visible;
+        AddNtfyChannelItem.IsEnabled = NtfyChannelPanel.Visibility != Visibility.Visible;
+        NotificationChannelComboBox.SelectedItem = AddBarkChannelItem.IsEnabled ? AddBarkChannelItem
+            : AddNtfyChannelItem.IsEnabled ? AddNtfyChannelItem : null;
+        AddNotificationChannelButton.IsEnabled = NotificationChannelComboBox.SelectedItem is not null;
+        NotificationChannelComboBox.IsEnabled = AddNotificationChannelButton.IsEnabled;
+    }
+
+    private async void AddNotificationChannel_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanAutoSaveSettings() || NotificationChannelComboBox.SelectedItem is not ComboBoxItem item) return;
+        if (item == AddBarkChannelItem) BarkChannelPanel.Visibility = Visibility.Visible;
+        else if (item == AddNtfyChannelItem) NtfyChannelPanel.Visibility = Visibility.Visible;
+        RefreshNotificationChannelChoices();
+        await SaveSettingsFromControlsAsync();
+    }
+
+    private async void RemoveNotificationChannel_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanAutoSaveSettings() || sender is not Button button) return;
+        var bark = button.Tag as string == "Bark";
+        if (AppDialog.ShowModal(this, "移除渠道", $"移除 {(bark ? "Bark" : "ntfy")} 渠道及其保存的凭据？",
+            AppDialogKind.Warning) != true) return;
+        if (bark)
+        {
+            BarkChannelPanel.Visibility = Visibility.Collapsed;
+            BarkEnabledCheckBox.IsChecked = true;
+            BarkServerTextBox.Text = "https://api.day.app";
+            BarkDeviceKeyPasswordBox.Password = string.Empty;
+        }
+        else
+        {
+            NtfyChannelPanel.Visibility = Visibility.Collapsed;
+            NtfyEnabledCheckBox.IsChecked = true;
+            NtfyServerTextBox.Text = "https://ntfy.sh";
+            NtfyTopicTextBox.Text = string.Empty;
+            NtfyTokenPasswordBox.Password = string.Empty;
+        }
+        RefreshNotificationChannelChoices();
+        await SaveSettingsFromControlsAsync();
     }
 
     private void LastRunDetailsButton_Click(object sender, RoutedEventArgs e)

@@ -37,6 +37,11 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Bark 失败与响应原文均不泄漏密钥", BarkFailuresAreSanitizedAsync),
     ("Bark 超时包含响应正文且取消有界", BarkTimeoutAndCancellationAsync),
     ("通知结果日志脱敏及写入失败隔离", NotificationJournalAsync),
+    ("双渠道迁移保存移除及设置优先级", NotificationChannelsRoundTripAsync),
+    ("ntfy JSON 发布与可选 Bearer 令牌", NtfyRequestAsync),
+    ("双渠道独立开关测试与失败隔离", NotificationChannelsIsolationAsync),
+    ("ntfy 输入响应和错误日志不泄漏凭据", NtfyFailuresAsync),
+    ("慢渠道不阻止其他渠道且响应正文超时有界", NotificationChannelsTimeoutAsync),
     ("整轮汇总隔离身份并保留异常和日志", WorkflowSummaryIncludesFailuresAsync),
     ("整轮成功与缺失任务历史失败准确区分", WorkflowSummarySuccessPolicyAsync),
     ("联网失败后安装不安全时不启动其他更新", UnsafeInstallationBlocksOtherUpdatesAsync),
@@ -318,8 +323,9 @@ static async Task NotificationSettingsRoundTripAsync()
     var restored = (await store.LoadAsync()).Settings;
     Assert.False(restored.NotificationsEnabled || restored.NotifyBeforeScheduledRun, "总开关关闭保存子选择");
     Assert.True(restored.NotifyRunStarted && restored.NotifyRunResult, "子选择无损");
-    Assert.Equal(settings.BarkAddress, restored.BarkAddress, "地址往返");
-    Assert.Equal(TimeSpan.FromMinutes(5), BarkNotificationService.ReminderLeadTime, "提前五分钟");
+    Assert.Equal("https://bark.invalid/prefix", restored.Bark!.ServerAddress, "旧地址迁移服务前缀");
+    Assert.Equal("test-device", restored.Bark.DeviceKey, "旧设备密钥往返");
+    Assert.Equal(TimeSpan.FromMinutes(5), NotificationService.ReminderLeadTime, "提前五分钟");
 }
 
 static async Task NotificationSwitchesGateRequestsAsync()
@@ -330,7 +336,7 @@ static async Task NotificationSwitchesGateRequestsAsync()
         count++;
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"code\":200}") });
     }));
-    var sender = new BarkNotificationService(client);
+    var sender = new NotificationService(client);
     var settings = new AppSettings { BarkAddress = "https://bark.invalid/device" };
     foreach (var kind in Enum.GetValues<RunNotificationKind>())
         Assert.False((await sender.SendAsync(settings, kind, "测试", "内容")).Sent, "总开关关闭无请求");
@@ -364,7 +370,7 @@ static async Task BarkCustomEndpointAsync()
         Assert.Equal("中文 & 内容", json.RootElement.GetProperty("body").GetString(), "正文无需路径编码");
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"code\":200}") };
     }));
-    var result = await new BarkNotificationService(client).SendAsync(new AppSettings
+    var result = await new NotificationService(client).SendAsync(new AppSettings
     {
         NotificationsEnabled = true, BarkAddress = "http://localhost:8080/bark/test%20device/"
     }, RunNotificationKind.Result, "结果", "中文 & 内容");
@@ -379,28 +385,28 @@ static async Task BarkFailuresAreSanitizedAsync()
     {
         using var client = new HttpClient(new NotificationTestHandler((_, _) => Task.FromResult(
             new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(content) })));
-        var result = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+        var result = await new NotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
         Assert.False(result.Sent, "错误不能报成功");
         Assert.False(result.Error!.Contains(secret), "不输出响应原文");
         if (content.StartsWith("broken", StringComparison.Ordinal))
             Assert.Equal("Bark 响应不是有效的 JSON", result.Error, "解析失败独立分类");
     }
     using var failureClient = new HttpClient(new NotificationTestHandler((_, _) => throw new HttpRequestException(secret)));
-    var failed = await new BarkNotificationService(failureClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    var failed = await new NotificationService(failureClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
     Assert.False(failed.Error!.Contains(secret), "异常不泄漏密钥");
     Assert.True(failed.Error.Contains("HTTP 请求失败"), "请求异常需要与响应解析失败区分");
     using var dnsClient = new HttpClient(new NotificationTestHandler((_, _) =>
         throw new HttpRequestException(HttpRequestError.NameResolutionError, secret)));
-    var dnsFailure = await new BarkNotificationService(dnsClient).SendAsync(settings, RunNotificationKind.Reminder, "提醒", "内容");
+    var dnsFailure = await new NotificationService(dnsClient).SendAsync(settings, RunNotificationKind.Reminder, "提醒", "内容");
     Assert.True(dnsFailure.Error!.Contains("NameResolutionError"), "保留脱敏的网络错误分类");
     using var rejectedClient = new HttpClient(new NotificationTestHandler((_, _) => Task.FromResult(
         new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent(secret) })));
-    var rejected = await new BarkNotificationService(rejectedClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    var rejected = await new NotificationService(rejectedClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
     Assert.Equal("Bark 服务返回 HTTP 403", rejected.Error, "只记录 HTTP 状态");
-    foreach (var address in new[] { "", "file:///secret", "https://bark.invalid/", "https://user:pass@bark.invalid/key", "https://bark.invalid/key?token=secret" })
+    foreach (var address in new[] { "file:///secret", "https://bark.invalid/", "https://user:pass@bark.invalid/key", "https://bark.invalid/key?token=secret" })
     {
         settings.BarkAddress = address;
-        var invalid = await new BarkNotificationService(failureClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+        var invalid = await new NotificationService(failureClient).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
         Assert.True(invalid.Error!.StartsWith("Bark 地址无效"), "非法地址不发请求");
     }
 }
@@ -411,12 +417,12 @@ static async Task BarkTimeoutAndCancellationAsync()
     using var client = new HttpClient(new NotificationTestHandler((_, _) => Task.FromResult(
         new HttpResponseMessage(HttpStatusCode.OK) { Content = new NotificationSlowContent() })));
     var watch = Stopwatch.StartNew();
-    var result = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    var result = await new NotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
     Assert.Equal("通知发送超时", result.Error, "正文也受五秒超时约束");
     Assert.True(watch.Elapsed < TimeSpan.FromSeconds(15), "超时有界");
     using var cancellation = new CancellationTokenSource();
     cancellation.Cancel();
-    var cancelled = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容", cancellation.Token);
+    var cancelled = await new NotificationService(client).SendAsync(settings, RunNotificationKind.Result, "结果", "内容", cancellation.Token);
     Assert.Equal("通知发送已取消", cancelled.Error, "关闭时取消发送");
 }
 
@@ -427,8 +433,8 @@ static async Task NotificationJournalAsync()
     var settings = new AppSettings { NotificationsEnabled = true, BarkAddress = "https://bark.invalid/" + secret };
     using var client = new HttpClient(new NotificationTestHandler((_, _) =>
         throw new HttpRequestException(HttpRequestError.NameResolutionError, secret)));
-    var delivery = await new BarkNotificationService(client).SendAsync(settings, RunNotificationKind.Reminder, secret, secret);
-    BarkNotificationService.RecordDelivery(RunNotificationKind.Reminder, delivery, area.Root, "08:00");
+    var delivery = await new NotificationService(client).SendAsync(settings, RunNotificationKind.Reminder, secret, secret);
+    NotificationService.RecordDelivery(RunNotificationKind.Reminder, delivery, area.Root, "08:00");
     var journal = await File.ReadAllTextAsync(area.File("notifications.jsonl"));
     using var entry = JsonDocument.Parse(journal);
     Assert.Equal("发送失败", entry.RootElement.GetProperty("Outcome").GetString(), "错误不会伪装成接收成功");
@@ -438,7 +444,226 @@ static async Task NotificationJournalAsync()
     Assert.False((await File.ReadAllTextAsync(area.File("crashes/crash.jsonl"))).Contains(secret), "诊断日志同样脱敏");
     var blockedRoot = area.File("blocked");
     await File.WriteAllTextAsync(blockedRoot, "occupied");
-    BarkNotificationService.RecordDelivery(RunNotificationKind.Result, new(true), blockedRoot);
+    NotificationService.RecordDelivery(RunNotificationKind.Result, new(true), blockedRoot);
+}
+
+static async Task NotificationChannelsRoundTripAsync()
+{
+    using var area = TestArea.Create();
+    await File.WriteAllTextAsync(area.File("settings.json"), """
+        {"NotificationsEnabled":true,"NotifyBeforeScheduledRun":false,"NotifyRunStarted":true,
+         "NotifyRunResult":true,"BarkAddress":" https://bark.invalid/proxy/test%20device/ "}
+        """);
+    var store = new SettingsStore(area.Root);
+    var settings = (await store.LoadAsync()).Settings;
+    Assert.True(settings.Bark is { IsEnabled: true } && settings.Ntfy is null, "旧用户只迁移启用的 Bark 渠道");
+    Assert.Equal("https://bark.invalid/proxy", settings.Bark!.ServerAddress, "保留服务前缀");
+    Assert.Equal("test device", settings.Bark.DeviceKey, "解码旧密钥");
+    Assert.True(settings.NotificationsEnabled && settings.NotifyRunStarted && settings.NotifyRunResult
+        && !settings.NotifyBeforeScheduledRun, "迁移不改变原通知时机");
+    settings.Bark = settings.Bark with { IsEnabled = false };
+    settings.Ntfy = new() { ServerAddress = " https://ntfy.invalid/proxy/ ", Topic = " private-topic ", AccessToken = " tk_secret " };
+    await store.SaveAsync(settings);
+    var restored = (await store.LoadAsync()).Settings;
+    Assert.Equal(settings.Bark, restored.Bark, "停用 Bark 的凭据保留");
+    Assert.Equal(settings.Ntfy, restored.Ntfy, "双渠道完整保存恢复");
+    Assert.Equal("private-topic", restored.Ntfy!.Topic, "字段规范化");
+    Assert.False(restored.Bark!.ToString().Contains("test device") || restored.Ntfy.ToString().Contains("tk_secret"), "模型诊断文本脱敏");
+    restored.Bark = null;
+    await store.SaveAsync(restored);
+    restored = (await store.LoadAsync()).Settings;
+    Assert.True(restored.Bark is null && restored.Ntfy is not null, "移除旧 Bark 不会复活且不影响 ntfy");
+    restored.Ntfy = null;
+    await store.SaveAsync(restored);
+    Assert.True((await store.LoadAsync()).Settings.Ntfy is null, "移除 ntfy 持久化");
+    var precedence = new AppSettings { BarkAddress = "https://old.invalid/old-key",
+        Bark = new() { IsEnabled = false, ServerAddress = "https://new.invalid", DeviceKey = "new-key" } };
+    precedence.Normalize();
+    Assert.Equal("new-key", precedence.Bark!.DeviceKey, "新配置优先，不被遗留字段覆盖");
+    Assert.False(precedence.Bark.IsEnabled, "迁移不重新启用已有渠道");
+    var invalid = new AppSettings { BarkAddress = "invalid-private-address" };
+    invalid.Normalize();
+    Assert.Equal("invalid-private-address", invalid.Bark!.DeviceKey, "异常旧数据保留在遮罩字段");
+    Assert.Equal("", invalid.Bark.ServerAddress, "不猜测异常旧地址的目标");
+}
+
+static async Task NtfyRequestAsync()
+{
+    foreach (var token in new[] { "", "tk_private_token" })
+    {
+        var calls = 0;
+        using var client = new HttpClient(new NotificationTestHandler(async (request, cancellation) =>
+        {
+            calls++;
+            Assert.Equal(HttpMethod.Post, request.Method, "JSON 发布使用 POST");
+            Assert.Equal("https://ntfy.invalid/proxy/", request.RequestUri!.AbsoluteUri, "发布到服务根路径，保留代理前缀");
+            Assert.Equal(token.Length == 0 ? null : "Bearer", request.Headers.Authorization?.Scheme, "令牌可选");
+            Assert.Equal(token.Length == 0 ? null : token, request.Headers.Authorization?.Parameter, "令牌仅位于认证头");
+            using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellation));
+            Assert.Equal("private-topic", json.RootElement.GetProperty("topic").GetString(), "主题位于 JSON");
+            Assert.Equal("中文标题", json.RootElement.GetProperty("title").GetString(), "中文标题不放入 HTTP 头");
+            Assert.Equal("中文 & 正文\n第二行", json.RootElement.GetProperty("message").GetString(), "中文正文");
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"id":"abc","event":"message","topic":"private-topic"}""") };
+        }));
+        var settings = new AppSettings { NotificationsEnabled = true,
+            Ntfy = new() { ServerAddress = "https://ntfy.invalid/proxy", Topic = "private-topic", AccessToken = token } };
+        var delivery = await new NotificationService(client).SendAsync(settings, RunNotificationKind.Result, "中文标题", "中文 & 正文\n第二行");
+        Assert.True(delivery.Sent && delivery.Channel == NotificationChannel.Ntfy, "ntfy 单渠道服务确认");
+        Assert.Equal(1, calls, "单次发送不重试");
+    }
+}
+
+static async Task NotificationChannelsIsolationAsync()
+{
+    var barkCalls = 0;
+    var ntfyCalls = 0;
+    var failBark = true;
+    using var client = new HttpClient(new NotificationTestHandler((request, _) =>
+    {
+        if (request.RequestUri!.Host == "bark.invalid")
+        {
+            barkCalls++;
+            if (failBark) throw new HttpRequestException("private-key");
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""{"code":200}""") });
+        }
+        ntfyCalls++;
+        return Task.FromResult(new HttpResponseMessage(failBark ? HttpStatusCode.OK : HttpStatusCode.Forbidden)
+        { Content = new StringContent("""{"id":"abc","event":"message","topic":"private-topic"}""") });
+    }));
+    var settings = new AppSettings { NotificationsEnabled = true,
+        Bark = new() { ServerAddress = "https://bark.invalid", DeviceKey = "private-key" },
+        Ntfy = new() { ServerAddress = "https://ntfy.invalid", Topic = "private-topic", AccessToken = "tk_secret" } };
+    var sender = new NotificationService(client);
+    var delivery = await sender.SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    Assert.False(delivery.Sent, "部分失败不可报全部成功");
+    Assert.True(delivery.Deliveries is [{ Sent: false }, { Sent: true }], "Bark 失败不阻止 ntfy");
+    using var area = TestArea.Create();
+    NotificationService.RecordDelivery(RunNotificationKind.Result, delivery, area.Root, "08:00");
+    var lines = await File.ReadAllLinesAsync(area.File("notifications.jsonl"));
+    Assert.Equal(2, lines.Length, "每个渠道记录独立结果");
+    using var first = JsonDocument.Parse(lines[0]);
+    using var second = JsonDocument.Parse(lines[1]);
+    Assert.Equal("Bark", first.RootElement.GetProperty("Channel").GetString(), "失败记录渠道");
+    Assert.Equal("服务已接收", second.RootElement.GetProperty("Outcome").GetString(), "保留另一渠道成功事实");
+    Assert.False(string.Join("", lines).Contains("private-key"), "多渠道日志同样脱敏");
+    failBark = false;
+    delivery = await sender.SendAsync(settings, RunNotificationKind.Reminder, "提醒", "内容");
+    Assert.True(delivery.Deliveries is [{ Sent: true }, { Sent: false }], "ntfy 失败不影响 Bark");
+    Assert.Equal(2, barkCalls, "失败无重试");
+    Assert.Equal(2, ntfyCalls, "两个渠道均尝试一次");
+    await sender.SendAsync(settings, RunNotificationKind.Test, "测试", "内容", channel: NotificationChannel.Bark);
+    Assert.Equal(3, barkCalls, "独立 Bark 测试");
+    Assert.Equal(2, ntfyCalls, "测试不误发另一渠道");
+    settings.Bark = settings.Bark with { IsEnabled = false };
+    delivery = await sender.SendAsync(settings, RunNotificationKind.Test, "测试", "内容", channel: NotificationChannel.Bark);
+    Assert.True(delivery.SkippedReason is not null, "停用渠道不可测试");
+    await sender.SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    Assert.Equal(3, barkCalls, "独立关闭 Bark");
+    Assert.Equal(3, ntfyCalls, "Bark 关闭不影响 ntfy");
+    settings.Ntfy = settings.Ntfy with { IsEnabled = false };
+    delivery = await sender.SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+    Assert.True(delivery.SkippedReason is not null, "无已启用渠道");
+    settings.Bark = settings.Bark with { IsEnabled = true };
+    settings.Ntfy = settings.Ntfy with { IsEnabled = true };
+    settings.NotificationsEnabled = false;
+    foreach (var kind in Enum.GetValues<RunNotificationKind>())
+        await sender.SendAsync(settings, kind, "测试", "内容", channel: NotificationChannel.Ntfy);
+    settings.NotificationsEnabled = true;
+    settings.NotifyBeforeScheduledRun = settings.NotifyRunStarted = settings.NotifyRunResult = false;
+    foreach (var kind in new[] { RunNotificationKind.Reminder, RunNotificationKind.Started, RunNotificationKind.Result })
+        await sender.SendAsync(settings, kind, "测试", "内容");
+    Assert.Equal(3, barkCalls, "总开关和时机开关阻止 Bark");
+    Assert.Equal(3, ntfyCalls, "总开关和时机开关阻止 ntfy");
+    await sender.SendAsync(settings, RunNotificationKind.Test, "测试", "内容", channel: NotificationChannel.Ntfy);
+    Assert.Equal(4, ntfyCalls, "独立 ntfy 测试不受时机开关影响");
+    using var successClient = new HttpClient(new NotificationTestHandler((request, _) => Task.FromResult(
+        new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(request.RequestUri!.Host == "bark.invalid"
+            ? """{"code":200}""" : """{"id":"abc","event":"message","topic":"private-topic"}""") })));
+    settings.NotifyBeforeScheduledRun = settings.NotifyRunStarted = settings.NotifyRunResult = true;
+    foreach (var kind in new[] { RunNotificationKind.Reminder, RunNotificationKind.Started, RunNotificationKind.Result })
+    {
+        var success = await new NotificationService(successClient).SendAsync(settings, kind, "标题", "内容");
+        Assert.True(success.Sent && success.Deliveries is [{ Sent: true }, { Sent: true }], "三个运行时机均发送双渠道");
+    }
+}
+
+static async Task NtfyFailuresAsync()
+{
+    const string secret = "private-secret";
+    var settings = new AppSettings { NotificationsEnabled = true,
+        Ntfy = new() { ServerAddress = "https://ntfy.invalid", Topic = secret, AccessToken = secret } };
+    foreach (var content in new[] { "broken " + secret, "[]", """{"event":"message","id":"abc","topic":"other"}""",
+        """{"event":"keepalive","id":"abc","topic":"private-secret"}""", """{"event":"message","id":1,"topic":"private-secret"}""" })
+    {
+        using var client = new HttpClient(new NotificationTestHandler((_, _) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(content) })));
+        var result = await new NotificationService(client).SendAsync(settings, RunNotificationKind.Result, secret, secret);
+        Assert.False(result.Sent, "不把异常响应视为接收成功");
+        Assert.False(result.Error!.Contains(secret), "ntfy 响应原文脱敏");
+    }
+    using var failureClient = new HttpClient(new NotificationTestHandler((_, _) =>
+        throw new HttpRequestException(HttpRequestError.NameResolutionError, secret)));
+    var failed = await new NotificationService(failureClient).SendAsync(settings, RunNotificationKind.Result, secret, secret);
+    using var area = TestArea.Create();
+    NotificationService.RecordDelivery(RunNotificationKind.Result, failed, area.Root);
+    foreach (var path in new[] { "notifications.jsonl", "crashes/crash.jsonl" })
+    {
+        var log = await File.ReadAllTextAsync(area.File(path));
+        Assert.False(log.Contains(secret) || log.Contains("ntfy.invalid"), "令牌主题正文及服务地址不进入日志");
+    }
+    using var noRequests = new HttpClient(new NotificationTestHandler((_, _) => throw new InvalidOperationException("非法输入不应发请求")));
+    foreach (var invalid in new[]
+    {
+        settings.Ntfy with { ServerAddress = "https://user:pass@ntfy.invalid" },
+        settings.Ntfy with { ServerAddress = "https://ntfy.invalid/?token=private-secret" },
+        settings.Ntfy with { ServerAddress = "file:///private-secret" },
+        settings.Ntfy with { Topic = "" }, settings.Ntfy with { Topic = "topic/path" },
+        settings.Ntfy with { AccessToken = "private-secret\r\nX-Header: injected" }
+    })
+    {
+        settings.Ntfy = invalid;
+        var result = await new NotificationService(noRequests).SendAsync(settings, RunNotificationKind.Test, secret, secret);
+        Assert.True(result.Error is not null && !result.Error.Contains(secret), "非法输入有脱敏反馈");
+    }
+}
+
+static async Task NotificationChannelsTimeoutAsync()
+{
+    foreach (var slowChannel in new[] { NotificationChannel.Bark, NotificationChannel.Ntfy })
+    {
+        var fastSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        using var client = new HttpClient(new NotificationTestHandler((request, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            var isBark = request.RequestUri!.Host == "bark.invalid";
+            if (isBark != (slowChannel == NotificationChannel.Bark))
+            {
+                fastSent.TrySetResult();
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(isBark
+                    ? """{"code":200}""" : """{"id":"abc","event":"message","topic":"private-topic"}""") });
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new NotificationSlowContent() });
+        }));
+        var settings = new AppSettings { NotificationsEnabled = true,
+            Bark = new() { ServerAddress = "https://bark.invalid", DeviceKey = "private-key" },
+            Ntfy = new() { ServerAddress = "https://ntfy.invalid", Topic = "private-topic" } };
+        var sender = new NotificationService(client);
+        var watch = Stopwatch.StartNew();
+        var send = sender.SendAsync(settings, RunNotificationKind.Result, "结果", "内容");
+        await fastSent.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(send.IsCompleted, "慢渠道还在等待时快渠道已发送");
+        var result = await send;
+        var deliveries = result.Deliveries!;
+        Assert.True(deliveries.Single(item => item.Channel == slowChannel).Error == "通知发送超时"
+            && deliveries.Single(item => item.Channel != slowChannel).Sent, "任一响应正文超时不丢另一渠道成功");
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), "双渠道整体有界");
+        Assert.Equal(2, calls, "超时不重试");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var cancelled = await sender.SendAsync(settings, RunNotificationKind.Test, "测试", "内容", cancellation.Token, slowChannel);
+        Assert.Equal("通知发送已取消", cancelled.Error, "两个渠道均支持关闭取消");
+    }
 }
 
 static Task WorkflowSummaryIncludesFailuresAsync()

@@ -30,9 +30,9 @@ public static class ScheduledLaunch
         if (!settings.ScheduledLaunchEnabled || !settings.DailySchedules.Any(item => item.IsEnabled && item.Time == request.Time))
             return "该定时已停用";
         var localNow = TimeZoneInfo.ConvertTime(now, zone).DateTime;
-        var triggerTime = request.Reminder ? time.Add(-BarkNotificationService.ReminderLeadTime) : time;
+        var triggerTime = request.Reminder ? time.Add(-NotificationService.ReminderLeadTime) : time;
         var trigger = localNow.Date + triggerTime.ToTimeSpan();
-        scheduledDate = request.Reminder ? trigger.Add(BarkNotificationService.ReminderLeadTime) : trigger;
+        scheduledDate = request.Reminder ? trigger.Add(NotificationService.ReminderLeadTime) : trigger;
         if (zone.IsInvalidTime(trigger) || zone.IsAmbiguousTime(trigger)) return "时钟切换期间跳过定时";
         if (localNow < trigger || localNow - trigger > TriggerTolerance
             || now < request.ReceivedAt || now - request.ReceivedAt > TriggerTolerance)

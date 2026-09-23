@@ -617,29 +617,22 @@
                         </Expander>
 
                         <Expander Header="外部通知" Style="{StaticResource SettingsExpanderStyle}">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="112" />
-                                    <ColumnDefinition Width="*" />
-                                </Grid.ColumnDefinitions>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="44" />
-                                    <RowDefinition Height="Auto" />
-                                </Grid.RowDefinitions>
-                                <TextBlock Grid.Row="0" Text="启用通知" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
-                                <CheckBox x:Name="NotificationsEnabledCheckBox" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
-                                          Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="启用 Bark 通知" Click="SettingsToggle_Click" />
-                                <Grid Grid.Row="1" Grid.ColumnSpan="2" IsEnabled="{Binding IsChecked, ElementName=NotificationsEnabledCheckBox}">
+                            <StackPanel>
+                                <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="112" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <Grid.RowDefinitions>
+                                        <RowDefinition Height="44" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
-                                    <TextBlock Text="通知时机" Margin="0,12,0,0" Foreground="{StaticResource MutedTextBrush}" />
-                                    <StackPanel Grid.Column="1" Margin="0,12,0,6">
+                                    <TextBlock Text="启用通知" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                    <CheckBox x:Name="NotificationsEnabledCheckBox" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                              Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="启用外部通知" Click="SettingsToggle_Click" />
+                                    <TextBlock Grid.Row="1" Text="通知时机" Margin="0,12,0,0" Foreground="{StaticResource MutedTextBrush}" />
+                                    <StackPanel Grid.Row="1" Grid.Column="1" Margin="0,12,0,6" IsEnabled="{Binding IsChecked, ElementName=NotificationsEnabledCheckBox}">
                                         <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
                                             <CheckBox x:Name="NotifyBeforeScheduledRunCheckBox" Content="定时提醒" AutomationProperties.Name="提前 5 分钟提醒，仅定时运行" Click="SettingsToggle_Click" />
                                             <TextBlock Text="提前 5 分钟" Margin="16,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
@@ -653,24 +646,91 @@
                                             <TextBlock Text="整轮汇总" Margin="16,0,0,0" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
                                         </StackPanel>
                                     </StackPanel>
-                                    <TextBlock Grid.Row="1" Text="推送地址" Margin="0,12,0,0" Foreground="{StaticResource MutedTextBrush}" />
-                                    <StackPanel Grid.Row="1" Grid.Column="1">
-                                        <DockPanel>
-                                            <Button x:Name="TestNotificationButton" DockPanel.Dock="Right" Content="测试通知"
-                                                    Margin="12,0,0,0" Click="TestNotificationButton_Click"
-                                                    Style="{StaticResource SecondaryButton}" />
-                                            <PasswordBox x:Name="BarkAddressPasswordBox" Height="42" Padding="12,0"
-                                                         Background="{StaticResource InputSurfaceBrush}"
-                                                         Foreground="{StaticResource PrimaryTextBrush}"
-                                                         BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
-                                                         VerticalContentAlignment="Center" AutomationProperties.Name="Bark 地址，包含设备密钥"
-                                                         KeyDown="SettingsTextInput_KeyDown"
-                                                         LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
-                                        </DockPanel>
-                                        <TextBlock Text="完整 Bark 地址，包含设备密钥" Margin="0,6,0,0" Foreground="{StaticResource MutedTextBrush}" />
+                                    <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal">
+                                        <ComboBox x:Name="NotificationChannelComboBox" Width="112" SelectedIndex="0" AutomationProperties.Name="选择通知渠道">
+                                            <ComboBoxItem x:Name="AddBarkChannelItem" Content="Bark" Tag="Bark" />
+                                            <ComboBoxItem x:Name="AddNtfyChannelItem" Content="ntfy" Tag="Ntfy" />
+                                        </ComboBox>
+                                        <Button x:Name="AddNotificationChannelButton" Content="添加渠道" Margin="12,0,0,0"
+                                                Style="{StaticResource SecondaryButton}" Click="AddNotificationChannel_Click" />
                                     </StackPanel>
                                 </Grid>
-                            </Grid>
+                                <StackPanel x:Name="BarkChannelPanel" Visibility="Collapsed" Margin="0,18,0,0">
+                                    <DockPanel LastChildFill="True">
+                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                            <CheckBox x:Name="BarkEnabledCheckBox" Content="使用" VerticalAlignment="Center"
+                                                      AutomationProperties.Name="启用 Bark 渠道" Click="SettingsToggle_Click" />
+                                            <Button Content="测试" Tag="Bark" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}"
+                                                    AutomationProperties.Name="测试 Bark 通知" Click="TestNotificationButton_Click" />
+                                            <Button Content="移除" Tag="Bark" Margin="8,0,0,0" Style="{StaticResource SecondaryButton}"
+                                                    AutomationProperties.Name="移除 Bark 渠道" Click="RemoveNotificationChannel_Click" />
+                                        </StackPanel>
+                                        <TextBlock DockPanel.Dock="Left" Text="Bark" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        <Border Height="1" Background="{StaticResource DividerBrush}" Margin="12,0,16,0" VerticalAlignment="Center" />
+                                    </DockPanel>
+                                    <Grid Margin="0,12,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Text="服务地址" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="BarkServerTextBox" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center"
+                                                     AutomationProperties.Name="服务地址" KeyDown="SettingsTextInput_KeyDown"
+                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock Grid.Row="1" Text="设备密钥" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <PasswordBox x:Name="BarkDeviceKeyPasswordBox" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
+                                                     Height="42" Padding="12,0" VerticalContentAlignment="Center"
+                                                     Background="{StaticResource InputSurfaceBrush}" Foreground="{StaticResource PrimaryTextBrush}"
+                                                     BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
+                                                     AutomationProperties.Name="设备密钥" KeyDown="SettingsTextInput_KeyDown"
+                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                    </Grid>
+                                </StackPanel>
+                                <StackPanel x:Name="NtfyChannelPanel" Visibility="Collapsed" Margin="0,18,0,0">
+                                    <DockPanel LastChildFill="True">
+                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                            <CheckBox x:Name="NtfyEnabledCheckBox" Content="使用" VerticalAlignment="Center"
+                                                      AutomationProperties.Name="启用 ntfy 渠道" Click="SettingsToggle_Click" />
+                                            <Button Content="测试" Tag="Ntfy" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}"
+                                                    AutomationProperties.Name="测试 ntfy 通知" Click="TestNotificationButton_Click" />
+                                            <Button Content="移除" Tag="Ntfy" Margin="8,0,0,0" Style="{StaticResource SecondaryButton}"
+                                                    AutomationProperties.Name="移除 ntfy 渠道" Click="RemoveNotificationChannel_Click" />
+                                        </StackPanel>
+                                        <TextBlock DockPanel.Dock="Left" Text="ntfy" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        <Border Height="1" Background="{StaticResource DividerBrush}" Margin="12,0,16,0" VerticalAlignment="Center" />
+                                    </DockPanel>
+                                    <Grid Margin="0,12,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Text="服务地址" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="NtfyServerTextBox" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center"
+                                                     AutomationProperties.Name="服务地址" KeyDown="SettingsTextInput_KeyDown"
+                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock Grid.Row="1" Text="订阅主题" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="NtfyTopicTextBox" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
+                                                     AutomationProperties.Name="订阅主题" KeyDown="SettingsTextInput_KeyDown"
+                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock Grid.Row="2" Text="访问令牌（可选）" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <PasswordBox x:Name="NtfyTokenPasswordBox" Grid.Row="2" Grid.Column="1" VerticalAlignment="Center"
+                                                     Height="42" Padding="12,0" VerticalContentAlignment="Center"
+                                                     Background="{StaticResource InputSurfaceBrush}" Foreground="{StaticResource PrimaryTextBrush}"
+                                                     BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
+                                                     AutomationProperties.Name="访问令牌（可选）" KeyDown="SettingsTextInput_KeyDown"
+                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                    </Grid>
+                                </StackPanel>
+                            </StackPanel>
                         </Expander>
 
                         <Expander Header="运行设置" Style="{StaticResource SettingsExpanderStyle}">
