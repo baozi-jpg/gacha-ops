@@ -540,10 +540,19 @@
                             <StackPanel>
                                 <TextBlock Text="每日定时" FontSize="17" FontWeight="SemiBold" />
                                 <CheckBox x:Name="ScheduledLaunchCheckBox" Content="启用定时运行" Margin="0,14,0,8" Click="SettingsToggle_Click" />
-                                <TextBlock x:Name="ScheduleTimeZoneText" TextWrapping="Wrap" Margin="0,0,0,10" />
                                 <DockPanel Margin="0,0,0,10">
                                     <Button DockPanel.Dock="Right" Content="添加时刻" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}" Click="AddScheduleButton_Click" />
-                                    <ComboBox x:Name="ScheduleTimeComboBox" IsEditable="True" IsTextSearchEnabled="False" />
+                                    <StackPanel Orientation="Horizontal">
+                                        <Border x:Name="ScheduleHourErrorBorder" BorderThickness="1" CornerRadius="6">
+                                            <ComboBox x:Name="ScheduleHourComboBox" Width="80" IsEditable="True" IsTextSearchEnabled="False"
+                                                      AutomationProperties.Name="小时" />
+                                        </Border>
+                                        <TextBlock Text=":" VerticalAlignment="Center" Margin="8,0" />
+                                        <Border x:Name="ScheduleMinuteErrorBorder" BorderThickness="1" CornerRadius="6">
+                                            <ComboBox x:Name="ScheduleMinuteComboBox" Width="80" IsEditable="True" IsTextSearchEnabled="False"
+                                                      AutomationProperties.Name="分钟" />
+                                        </Border>
+                                    </StackPanel>
                                 </DockPanel>
                                 <ItemsControl x:Name="ScheduleList">
                                     <ItemsControl.ItemTemplate>
@@ -580,7 +589,7 @@
                                     </DockPanel>
                                     <CheckBox x:Name="NotifyBeforeScheduledRunCheckBox" Content="提前 5 分钟提醒（仅定时运行）"
                                               Margin="0,14,0,10" Click="SettingsToggle_Click" />
-                                    <CheckBox x:Name="NotifyRunStartedCheckBox" Content="开始运行通知"
+                                    <CheckBox x:Name="NotifyRunStartedCheckBox" Content="定时开始通知"
                                               Margin="0,0,0,10" Click="SettingsToggle_Click" />
                                     <CheckBox x:Name="NotifyRunResultCheckBox" Content="结果通知" Click="SettingsToggle_Click" />
                                 </StackPanel>

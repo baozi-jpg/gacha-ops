@@ -6,7 +6,7 @@ namespace GachaOps.Core.Services;
 
 public enum RunNotificationKind { Reminder, Started, Result, Test }
 
-public sealed record NotificationDeliveryResult(bool Sent, string? Error = null);
+public sealed record NotificationDeliveryResult(bool Sent, string? Error = null, string? SkippedReason = null);
 
 public sealed class BarkNotificationService(HttpClient? client = null)
 {
@@ -21,7 +21,9 @@ public sealed class BarkNotificationService(HttpClient? client = null)
         AppSettings settings, RunNotificationKind kind, string title, string body,
         CancellationToken cancellationToken = default)
     {
-        if (!settings.NotificationsEnabled || !(kind switch
+        if (!settings.NotificationsEnabled)
+            return new(false, SkippedReason: "通知总开关关闭");
+        if (!(kind switch
             {
                 RunNotificationKind.Reminder => settings.NotifyBeforeScheduledRun,
                 RunNotificationKind.Started => settings.NotifyRunStarted,
@@ -29,7 +31,7 @@ public sealed class BarkNotificationService(HttpClient? client = null)
                 RunNotificationKind.Test => true,
                 _ => false
             }))
-            return new(false);
+            return new(false, SkippedReason: "该类通知已关闭");
 
         if (!TryGetEndpoint(settings.BarkAddress, out var endpoint, out var key))
             return new(false, "Bark 地址无效，请填写包含设备密钥的 HTTP(S) 地址");
@@ -53,11 +55,42 @@ public sealed class BarkNotificationService(HttpClient? client = null)
         {
             return new(false, cancellationToken.IsCancellationRequested ? "通知发送已取消" : "通知发送超时");
         }
-        catch (Exception exception) when (exception is HttpRequestException or IOException or JsonException)
+        catch (HttpRequestException exception)
         {
-            // Never log exception text or response bodies: either can contain the device key.
-            return new(false, "通知发送失败，请检查网络和 Bark 服务");
+            // Only framework error categories are safe: messages and response bodies can contain the device key.
+            return new(false, $"通知 HTTP 请求失败（{exception.HttpRequestError}）");
         }
+        catch (IOException)
+        {
+            return new(false, "通知连接读写失败");
+        }
+        catch (JsonException)
+        {
+            return new(false, "Bark 响应不是有效的 JSON");
+        }
+    }
+
+    public static void RecordDelivery(RunNotificationKind kind, NotificationDeliveryResult result,
+        string? root = null, string? scheduledTime = null)
+    {
+        root ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GachaOps");
+        try
+        {
+            Directory.CreateDirectory(root);
+            // Never persist the address, payload, or raw exception. Accepted does not mean delivered to the phone.
+            File.AppendAllText(Path.Combine(root, "notifications.jsonl"), JsonSerializer.Serialize(new
+            {
+                At = DateTimeOffset.Now, Kind = kind.ToString(), ScheduledTime = scheduledTime,
+                Outcome = result.Sent ? "服务已接收" : result.Error is not null ? "发送失败" : "未发送",
+                Reason = result.Error ?? result.SkippedReason
+            }) + Environment.NewLine);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            new CrashLogStore(root).TryWrite("NotificationLog", new IOException("通知结果记录失败"));
+        }
+        if (result.Error is { } error)
+            new CrashLogStore(root).TryWrite("BarkNotification", new InvalidOperationException(error));
     }
 
     private static bool TryGetEndpoint(string? address, out Uri? endpoint, out string key)

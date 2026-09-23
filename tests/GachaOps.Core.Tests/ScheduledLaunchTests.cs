@@ -25,6 +25,10 @@ internal static class ScheduledLaunchTests
         foreach (var invalid in new[] { "8", "08:60", "-1:00", "08:17:00", "garbage" })
             Check(!ScheduledLaunch.TryTime(invalid, out _), "无效时间被接受");
         Check(ScheduledLaunch.TryTime("08:17", out _), "必须允许任意分钟");
+        foreach (var text in new[] { "8:5", "08:5", "8:05", "08:05" })
+            Check(ScheduledLaunch.TryTime(text, out var time) && time == new TimeOnly(8, 5), "小时和分钟均支持一位或两位");
+        foreach (var text in new[] { "8:", ":5", "008:05", "08:005", "24:00", "1:60", "a:05" })
+            Check(!ScheduledLaunch.TryTime(text, out _), "空值及非法分段不能接受");
     }
 
     public static Task TimingAsync()
@@ -48,6 +52,13 @@ internal static class ScheduledLaunchTests
         var reminder = new ScheduledRequest("00:02", true, new DateTimeOffset(midnight, TimeSpan.Zero));
         Check(ScheduledLaunch.Validate(settings, reminder, reminder.ReceivedAt, TimeZoneInfo.Utc, out var date) is null
             && date == now.Date.AddDays(1).AddMinutes(2), "跨午夜提前五分钟应属于次日轮次");
+        settings.DailySchedules = [new("08:20")];
+        var lateReminder = new ScheduledRequest("08:20", true, now);
+        Check(ScheduledLaunch.Validate(settings, lateReminder, now, TimeZoneInfo.Utc, out _) is not null,
+            "新增三分钟后运行的时刻不补发已经错过的提醒");
+        var upcomingRun = new ScheduledRequest("08:20", false, now.AddMinutes(3));
+        Check(ScheduledLaunch.Validate(settings, upcomingRun, upcomingRun.ReceivedAt, TimeZoneInfo.Utc, out _) is null,
+            "错过提醒不影响到点运行");
         return Task.CompletedTask;
     }
 
@@ -190,9 +201,19 @@ internal static class ScheduledLaunchTests
         var report = await ScheduledRunReport.SkipAsync(settings, request, "已有一轮运行或准备中", root, history, notifications);
         Check(report.Persisted && (await history.ReadAllAsync()).Single().State == RunState.Skipped, "跳过记录准确");
         Check(handler.Calls == 1 && report.Summary.Body.Contains("已有一轮"), "结果通知携带跳过原因");
+        var journalPath = Path.Combine(root, "notifications.jsonl");
+        using (var entry = JsonDocument.Parse(File.ReadLines(journalPath).Last()))
+        {
+            Check(entry.RootElement.GetProperty("Outcome").GetString() == "服务已接收", "记录服务接收而非手机送达");
+            Check(entry.RootElement.GetProperty("ScheduledTime").GetString() == request.Time, "通知记录可关联定时时刻");
+        }
+        report = await ScheduledRunReport.SkipAsync(settings, request, "其他应用处于前台", root, history, notifications);
+        Check(handler.Calls == 2 && report.Summary.Body.Contains("其他应用处于前台"), "前台占用也须发送跳过结果");
         settings.NotifyRunResult = false;
         await ScheduledRunReport.SkipAsync(settings, request, "已锁屏", root, history, notifications);
-        Check(handler.Calls == 1, "结果开关独立");
+        Check(handler.Calls == 2, "结果开关独立");
+        using (var entry = JsonDocument.Parse(File.ReadLines(journalPath).Last()))
+            Check(entry.RootElement.GetProperty("Reason").GetString() == "该类通知已关闭", "关闭开关的静默结果必须可区分");
         var blockedRoot = Path.Combine(NewRoot(), "file");
         File.WriteAllText(blockedRoot, "cannot create directory here");
         report = await ScheduledRunReport.SkipAsync(settings, request, "前台变化", blockedRoot, new HistoryStore(blockedRoot), notifications);

@@ -31,7 +31,7 @@ public static class ScheduledRunReport
         var summary = WorkflowRunSummary.Create(id, now, now, planned, records,
             QueueRunResult.NotAllPlannedTasksCompleted, persisted, $"定时 {request.Time} 已跳过：{reason}");
         var delivery = await notifications.SendAsync(settings, RunNotificationKind.Result, summary.Title, summary.Body);
-        if (delivery.Error is { } error) new CrashLogStore(root).TryWrite("BarkNotification", new InvalidOperationException(error));
+        BarkNotificationService.RecordDelivery(RunNotificationKind.Result, delivery, root, request.Time);
         return (summary, persisted);
     }
 }
