@@ -194,7 +194,7 @@ internal static class ScheduledLaunchTests
         var history = new HistoryStore(root);
         var handler = new CaptureHandler();
         using var client = new HttpClient(handler);
-        var notifications = new BarkNotificationService(client);
+        var notifications = new NotificationService(client);
         var settings = new AppSettings { NotificationsEnabled = true, NotifyRunResult = true,
             BarkAddress = "https://example.invalid/key", WorkflowTasks = [new() { ToolId = ToolId.Maa, IsEnabled = true, Channel = 1 }] };
         var request = new ScheduledRequest("08:17", false, DateTimeOffset.Now);

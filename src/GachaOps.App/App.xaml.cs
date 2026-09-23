@@ -42,11 +42,11 @@ public partial class App : Application
                     delivery = new(false, SkippedReason: !reminderSettings.NotificationsEnabled ? "通知总开关关闭" : "该类通知已关闭");
                 else if (new ScheduledLaunchStore(GachaOps.App.MainWindow.DataRoot).TryClaim(request, date))
                 {
-                    delivery = await new BarkNotificationService().SendAsync(reminderSettings, RunNotificationKind.Reminder,
+                    delivery = await new NotificationService().SendAsync(reminderSettings, RunNotificationKind.Reminder,
                         "GachaOps · 定时提醒", $"计划于 {request.Time} 运行当前已启用任务（本机时间）。请保持登录、未锁屏并停留在桌面。");
                 }
                 else delivery = new(false, SkippedReason: "本次提醒已处理");
-                BarkNotificationService.RecordDelivery(RunNotificationKind.Reminder, delivery, scheduledTime: request.Time);
+                NotificationService.RecordDelivery(RunNotificationKind.Reminder, delivery, scheduledTime: request.Time);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
             { _crashLogStore.TryWrite("ScheduledReminder", exception); }
@@ -68,9 +68,9 @@ public partial class App : Application
                     try
                     {
                         var settings = (await new SettingsStore().LoadAsync()).Settings;
-                        var delivery = await new BarkNotificationService().SendAsync(settings, RunNotificationKind.Result,
+                        var delivery = await new NotificationService().SendAsync(settings, RunNotificationKind.Result,
                             "GachaOps · 定时状态待确认", $"定时 {request.Time} 转交未获确认，请检查已有实例。不会排队或重试，请查看本地诊断日志。");
-                        BarkNotificationService.RecordDelivery(RunNotificationKind.Result, delivery, scheduledTime: request.Time);
+                        NotificationService.RecordDelivery(RunNotificationKind.Result, delivery, scheduledTime: request.Time);
                     }
                     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                     { _crashLogStore.TryWrite("ScheduledForward", exception); }
@@ -108,7 +108,7 @@ public partial class App : Application
                     _crashLogStore.TryWrite("ScheduledClaim", exception);
                 }
                 var report = await ScheduledRunReport.SkipAsync(settings, request, validation ?? initialBlock, GachaOps.App.MainWindow.DataRoot,
-                    new HistoryStore(), new BarkNotificationService());
+                    new HistoryStore(), new NotificationService());
                 if (report.Persisted && !claimFailed) { Shutdown(); return; }
                 startupFailure = report.Summary;
             }

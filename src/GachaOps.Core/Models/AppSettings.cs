@@ -41,6 +41,10 @@ public sealed class AppSettings
 
     public string BarkAddress { get; set; } = string.Empty;
 
+    public BarkNotificationSettings? Bark { get; set; }
+
+    public NtfyNotificationSettings? Ntfy { get; set; }
+
     public List<WorkflowTaskSetting>? WorkflowTasks { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -62,6 +66,16 @@ public sealed class AppSettings
             .Select(item => item with { Time = TimeOnly.Parse(item.Time, System.Globalization.CultureInfo.InvariantCulture).ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture) })
             .DistinctBy(item => item.Time).OrderBy(item => item.Time).ToList();
         BarkAddress = BarkAddress?.Trim() ?? string.Empty;
+        if (Bark is null && BarkAddress.Length > 0)
+            Bark = NotificationService.MigrateBarkAddress(BarkAddress);
+        // Clear the legacy credential after migration so removing Bark stays removed.
+        BarkAddress = string.Empty;
+        if (Bark is { } bark)
+            Bark = bark with { ServerAddress = bark.ServerAddress?.Trim() ?? string.Empty,
+                DeviceKey = bark.DeviceKey?.Trim() ?? string.Empty };
+        if (Ntfy is { } ntfy)
+            Ntfy = ntfy with { ServerAddress = ntfy.ServerAddress?.Trim() ?? string.Empty,
+                Topic = ntfy.Topic?.Trim() ?? string.Empty, AccessToken = ntfy.AccessToken?.Trim() ?? string.Empty };
         BetterGiMode = string.Equals(BetterGiMode, "ScriptGroups", StringComparison.OrdinalIgnoreCase)
             ? "ScriptGroups"
             : "OneDragon";

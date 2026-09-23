@@ -6,7 +6,7 @@ public static class ScheduledRunReport
 {
     public static async Task<(WorkflowRunSummary Summary, bool Persisted)> SkipAsync(
         AppSettings settings, ScheduledRequest request, string reason, string root, HistoryStore history,
-        BarkNotificationService notifications)
+        NotificationService notifications)
     {
         var now = DateTimeOffset.Now;
         var id = Guid.NewGuid();
@@ -31,7 +31,7 @@ public static class ScheduledRunReport
         var summary = WorkflowRunSummary.Create(id, now, now, planned, records,
             QueueRunResult.NotAllPlannedTasksCompleted, persisted, $"定时 {request.Time} 已跳过：{reason}");
         var delivery = await notifications.SendAsync(settings, RunNotificationKind.Result, summary.Title, summary.Body);
-        BarkNotificationService.RecordDelivery(RunNotificationKind.Result, delivery, root, request.Time);
+        NotificationService.RecordDelivery(RunNotificationKind.Result, delivery, root, request.Time);
         return (summary, persisted);
     }
 }

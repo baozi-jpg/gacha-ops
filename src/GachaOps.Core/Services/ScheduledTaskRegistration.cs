@@ -14,7 +14,7 @@ public static class ScheduledTaskRegistration
     {
         if (!Path.IsPathFullyQualified(executable) || !ScheduledLaunch.TryTime(time, out var parsed))
             throw new ArgumentException("定时启动路径或时间无效");
-        var trigger = reminder ? parsed.Add(-BarkNotificationService.ReminderLeadTime) : parsed;
+        var trigger = reminder ? parsed.Add(-NotificationService.ReminderLeadTime) : parsed;
         XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
         XElement E(string name, params object[] values) => new(ns + name, values);
         return new XDocument(E("Task", new XAttribute("version", "1.2"),
