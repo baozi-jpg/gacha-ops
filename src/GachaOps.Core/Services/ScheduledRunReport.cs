@@ -4,7 +4,7 @@ namespace GachaOps.Core.Services;
 
 public static class ScheduledRunReport
 {
-    public static async Task<(WorkflowRunSummary Summary, bool Persisted)> SkipAsync(
+    public static async Task<(WorkflowRunSummary Summary, bool Persisted, NotificationDeliveryResult Delivery)> SkipAsync(
         AppSettings settings, ScheduledRequest request, string reason, string root, HistoryStore history,
         NotificationService notifications)
     {
@@ -32,6 +32,6 @@ public static class ScheduledRunReport
             QueueRunResult.NotAllPlannedTasksCompleted, persisted, $"定时 {request.Time} 已跳过：{reason}");
         var delivery = await notifications.SendAsync(settings, RunNotificationKind.Result, summary.Title, summary.Body);
         NotificationService.RecordDelivery(RunNotificationKind.Result, delivery, root, request.Time);
-        return (summary, persisted);
+        return (summary, persisted, delivery);
     }
 }

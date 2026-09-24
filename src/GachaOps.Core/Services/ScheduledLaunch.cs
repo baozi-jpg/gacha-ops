@@ -17,6 +17,26 @@ public static class ScheduledLaunch
     public static bool TryTime(string? text, out TimeOnly time) => TimeOnly.TryParseExact(
         text, ["H:m", "H:mm", "HH:m", "HH:mm"], CultureInfo.InvariantCulture, DateTimeStyles.None, out time);
 
+    public static string? FindConflictingTime(IEnumerable<DailySchedule> schedules, string time)
+    {
+        if (!TryTime(time, out var candidate)) return null;
+        foreach (var item in schedules)
+        {
+            if (!item.IsEnabled || !TryTime(item.Time, out var existing) || candidate == existing) continue;
+            var minutes = Math.Abs((candidate.ToTimeSpan() - existing.ToTimeSpan()).TotalMinutes);
+            if (Math.Min(minutes, 24 * 60 - minutes) < 60) return item.Time;
+        }
+        return null;
+    }
+
+    public static string? SpacingBlock(IReadOnlyList<DailySchedule> schedules)
+    {
+        foreach (var item in schedules.Where(item => item.IsEnabled))
+            if (FindConflictingTime(schedules, item.Time) is { } conflict)
+                return $"定时 {item.Time} 与 {conflict} 间隔不足一小时，请取消其中一项";
+        return null;
+    }
+
     public static ScheduledRequest? Parse(string[] args, DateTimeOffset now) =>
         args.Length == 2 && args[0] is "--scheduled-run" or "--scheduled-reminder"
         && TryTime(args[1], out var time)
@@ -29,6 +49,7 @@ public static class ScheduledLaunch
         if (!TryTime(request.Time, out var time)) return "定时时刻无效";
         if (!settings.ScheduledLaunchEnabled || !settings.DailySchedules.Any(item => item.IsEnabled && item.Time == request.Time))
             return "该定时已停用";
+        if (SpacingBlock(settings.DailySchedules) is { } spacingBlock) return spacingBlock;
         var localNow = TimeZoneInfo.ConvertTime(now, zone).DateTime;
         var triggerTime = request.Reminder ? time.Add(-NotificationService.ReminderLeadTime) : time;
         var trigger = localNow.Date + triggerTime.ToTimeSpan();

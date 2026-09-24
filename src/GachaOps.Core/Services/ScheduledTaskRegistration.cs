@@ -37,7 +37,7 @@ public static class ScheduledTaskRegistration
     {
         var prefix = $"GachaOps-{userSid}-Daily-";
         var desired = new Dictionary<string, string>();
-        if (settings.ScheduledLaunchEnabled)
+        if (settings.ScheduledLaunchEnabled && ScheduledLaunch.SpacingBlock(settings.DailySchedules) is null)
             foreach (var item in settings.DailySchedules.Where(item => item.IsEnabled))
                 foreach (var reminder in new[] { false, true })
                     if (!reminder || (settings.NotificationsEnabled && settings.NotifyBeforeScheduledRun))
