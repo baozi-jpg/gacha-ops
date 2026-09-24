@@ -24,6 +24,7 @@ const string NewerResourceVersion = MaaResourceTestData.NewerVersion;
 var tests = new (string Name, Func<Task> Run)[]
 {
     ("每日定时设置与任意分钟选择", ScheduledLaunchTests.SettingsAsync),
+    ("定时间隔跨午夜及旧冲突配置阻断", ScheduledLaunchTests.SpacingAsync),
     ("定时窄窗口及跨日提醒", ScheduledLaunchTests.TimingAsync),
     ("定时持久认领防重与时钟回拨", ScheduledLaunchTests.ClaimsAsync),
     ("锁屏前台及忙碌准入", ScheduledLaunchTests.DesktopAsync),

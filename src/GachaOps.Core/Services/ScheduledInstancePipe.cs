@@ -30,13 +30,13 @@ public static class ScheduledInstancePipe
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             try
             {
-                await pipe.WaitForConnectionAsync(cancellationToken);
+                await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(3));
                 // A length-bounded line avoids waiting for EOF while the sender waits for acknowledgement.
                 var bytes = new List<byte>();
                 var single = new byte[1];
-                while (bytes.Count < 1024 && await pipe.ReadAsync(single, timeout.Token) == 1)
+                while (bytes.Count < 1024 && await pipe.ReadAsync(single, timeout.Token).ConfigureAwait(false) == 1)
                 {
                     bytes.Add(single[0]);
                     if (single[0] == (byte)'\n') break;
@@ -45,7 +45,7 @@ public static class ScheduledInstancePipe
                 if (request is not null && ScheduledLaunch.TryTime(request.Time, out _) && !request.Reminder)
                 {
                     receive(request);
-                    await pipe.WriteAsync(new byte[] { 1 }, timeout.Token);
+                    await pipe.WriteAsync(new byte[] { 1 }, timeout.Token).ConfigureAwait(false);
                 }
             }
             catch (Exception exception) when (exception is IOException or JsonException or OperationCanceledException or UnauthorizedAccessException)

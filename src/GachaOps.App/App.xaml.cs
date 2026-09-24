@@ -89,42 +89,20 @@ public partial class App : Application
             var loadResult = new SettingsStore().LoadAsync().GetAwaiter().GetResult();
             var settings = loadResult.Settings;
             // Capture before Show/Activate; our own window must not manufacture permission.
-            WorkflowRunSummary? startupFailure = null;
             var initialBlock = request is null ? null
                 : ScheduledLaunch.Validate(settings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out _) ?? ScheduledDesktopGuard.Check();
-            if (request is not null && initialBlock is not null)
-            {
-                var validation = ScheduledLaunch.Validate(settings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out var date);
-                var claimFailed = false;
-                try
-                {
-                    if (validation is null && !new ScheduledLaunchStore(GachaOps.App.MainWindow.DataRoot).TryClaim(request, date))
-                    { Shutdown(); return; }
-                }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
-                {
-                    claimFailed = true;
-                    validation = "无法安全保存定时认领记录";
-                    _crashLogStore.TryWrite("ScheduledClaim", exception);
-                }
-                var report = await ScheduledRunReport.SkipAsync(settings, request, validation ?? initialBlock, GachaOps.App.MainWindow.DataRoot,
-                    new HistoryStore(), new NotificationService());
-                if (report.Persisted && !claimFailed) { Shutdown(); return; }
-                startupFailure = report.Summary;
-            }
-            var mainWindow = new MainWindow(settings, initialBlock is null ? request : null, request is not null);
+            var mainWindow = new MainWindow(settings, request, request is not null, initialBlock);
             MainWindow = mainWindow;
-            if (settings.MinimizeOnStartup || request is not null)
+            if (initialBlock is null && (settings.MinimizeOnStartup || request is not null))
             {
                 mainWindow.WindowState = WindowState.Minimized;
                 mainWindow.ShowActivated = false;
             }
 
             mainWindow.Show();
-            if (startupFailure is not null) mainWindow.ShowScheduledFailure(startupFailure);
             ShutdownMode = ShutdownMode.OnMainWindowClose;
             _pipeListener = ScheduledInstancePipe.ListenAsync(PipeName,
-                incoming => Dispatcher.Invoke(() => { _ = mainWindow.HandleScheduledRequestAsync(incoming); }), _pipeCancellation.Token);
+                incoming => Dispatcher.BeginInvoke(() => { _ = mainWindow.HandleScheduledRequestAsync(incoming); }), _pipeCancellation.Token);
             if (loadResult.RecoveredFromCorruptSettings)
             {
                 AppDialog.ShowModal(

@@ -92,9 +92,11 @@ public partial class MainWindow : Window
     private int _displayedLogCharacters;
     private int _droppedPendingLogLines;
 
-    public MainWindow(AppSettings settings, ScheduledRequest? scheduledRequest = null, bool suppressStartupRun = false)
+    public MainWindow(AppSettings settings, ScheduledRequest? scheduledRequest = null, bool suppressStartupRun = false,
+        string? initialScheduledBlock = null)
     {
         _initialScheduledRequest = scheduledRequest;
+        _initialScheduledBlock = initialScheduledBlock;
         _suppressStartupRun = suppressStartupRun;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         InitializeComponent();
@@ -186,7 +188,7 @@ public partial class MainWindow : Window
             }
             RefreshScheduledRegistration();
             _initializationComplete = true;
-            if (_initialScheduledRequest is not null) await HandleScheduledRequestAsync(_initialScheduledRequest);
+            if (_initialScheduledRequest is not null) await HandleScheduledRequestAsync(_initialScheduledRequest, _initialScheduledBlock);
             else if (!_suppressStartupRun) await RunStartupWorkflowIfEnabledAsync();
         }
         catch (OperationCanceledException) when (_appCancellation.IsCancellationRequested)
@@ -559,8 +561,12 @@ public partial class MainWindow : Window
             var snapshot = WorkflowTaskPlan.CreateSnapshot(settingsForRun.WorkflowTasks!);
             if (!snapshot.Any(task => task.IsEnabled))
             {
-                if (scheduledRequest is not null) await ReportScheduledSkipAsync(scheduledRequest, "没有已启用任务，本次任务未启动", currentRun: true);
-                else await SummarizeUnstartedRunAsync(settingsForRun, "没有已启用任务，本次任务未启动");
+                if (scheduledRequest is not null)
+                {
+                    await ReportScheduledSkipAsync(scheduledRequest, "没有已启用任务，本次任务未启动", currentRun: true);
+                    return;
+                }
+                await SummarizeUnstartedRunAsync(settingsForRun, "没有已启用任务，本次任务未启动");
                 if (startedAutomatically)
                 {
                     RestoreWindowForInteraction();
@@ -731,7 +737,7 @@ public partial class MainWindow : Window
                     });
                 historyPersisted = await WaitForHistoryWritesAsync();
                 SetFooter(summaryReason, Color.FromRgb(255, 159, 10));
-                if (!historyPersisted) RestoreWindowForInteraction();
+                completionWarning = historyPersisted ? summaryReason : $"{summaryReason}{Environment.NewLine}历史保存失败";
                 return;
             }
 
@@ -799,8 +805,12 @@ public partial class MainWindow : Window
                 workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings);
             LastRunDetailsButton.IsEnabled = true;
             if (!cancelledByUser && !_stopAfterCurrentRequested)
-                await SendNotificationAsync(settingsForRun, RunNotificationKind.Result,
+            {
+                var delivery = await SendNotificationAsync(settingsForRun, RunNotificationKind.Result,
                     _lastRunSummary.Title, _lastRunSummary.Body, scheduledRequest?.Time);
+                if (scheduledRequest is not null && completionWarning is not null && delivery.Error is { } error)
+                    completionWarning += $"{Environment.NewLine}通知发送失败：{error}";
+            }
             else
                 NotificationService.RecordDelivery(RunNotificationKind.Result,
                     new(false, SkippedReason: "用户主动取消或停止"), DataRoot, scheduledRequest?.Time);
@@ -849,7 +859,7 @@ public partial class MainWindow : Window
         var shutdownCancellationRequested = _isClosing
             || _appCancellation.IsCancellationRequested
             || Dispatcher.HasShutdownStarted;
-        if (WorkflowAutomationPolicy.ShouldExitAfterCompletion(
+        if (_scheduledSkipReports == 0 && WorkflowAutomationPolicy.ShouldExitAfterCompletion(
                 settingsForRun,
                 queueResult,
                 shutdownCancellationRequested,
@@ -2125,7 +2135,7 @@ public partial class MainWindow : Window
     private void UpdateDurations() => _workflow.UpdateDurations(DateTimeOffset.Now);
 
     private bool IsWorkflowEditingLocked =>
-        _isWorkflowLifecycleLocked || _isClosePending || _isClosing || _isBusy || _isPreparing || _queue.IsRunning;
+        _isWorkflowLifecycleLocked || _scheduledSkipReports > 0 || _isClosePending || _isClosing || _isBusy || _isPreparing || _queue.IsRunning;
 
     private void UpdateWorkflowInteractionState()
     {

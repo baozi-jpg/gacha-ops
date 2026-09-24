@@ -31,6 +31,55 @@ internal static class ScheduledLaunchTests
             Check(!ScheduledLaunch.TryTime(text, out _), "空值及非法分段不能接受");
     }
 
+    public static async Task SpacingAsync()
+    {
+        var now = new DateTimeOffset(2026, 9, 24, 8, 0, 0, TimeSpan.Zero);
+        var settings = new AppSettings { ScheduledLaunchEnabled = true,
+            NotificationsEnabled = true, DailySchedules = [new("08:00"), new("08:59")] };
+        var request = new ScheduledRequest("08:00", false, now);
+        Check(ScheduledLaunch.Validate(settings, request, now, TimeZoneInfo.Utc, out _) is not null,
+            "相差 59 分钟的已启用时刻必须阻止运行");
+        settings.DailySchedules[1] = new("09:00");
+        Check(ScheduledLaunch.Validate(settings, request, now, TimeZoneInfo.Utc, out _) is null,
+            "恰好一小时可以运行");
+        settings.DailySchedules[1] = new("08:05", false);
+        Check(ScheduledLaunch.Validate(settings, request, now, TimeZoneInfo.Utc, out _) is null,
+            "未勾选的冲突时刻可以保留");
+        Check(ScheduledLaunch.FindConflictingTime(settings.DailySchedules, "8:5") == "08:00",
+            "新增和勾选冲突项共享规范化校验");
+        Check(ScheduledLaunch.FindConflictingTime(settings.DailySchedules, "09:00") is null,
+            "新增恰好一小时的时刻可以启用");
+        settings.DailySchedules = [new("23:30"), new("00:15")];
+        now = new DateTimeOffset(2026, 9, 24, 23, 30, 0, TimeSpan.Zero);
+        request = new("23:30", false, now);
+        Check(ScheduledLaunch.Validate(settings, request, now, TimeZoneInfo.Utc, out _) is not null,
+            "跨午夜 45 分钟也必须拒绝");
+        settings.DailySchedules[1] = new("00:30");
+        Check(ScheduledLaunch.Validate(settings, request, now, TimeZoneInfo.Utc, out _) is null,
+            "跨午夜恰好一小时可启用");
+
+        settings.DailySchedules = [new("08:00"), new("08:05"), new("12:00")];
+        var store = new SettingsStore(NewRoot());
+        await store.SaveAsync(settings);
+        settings = (await store.LoadAsync()).Settings;
+        Check(settings.DailySchedules.All(item => item.IsEnabled), "旧冲突配置不得悄悄取消勾选");
+        var disabled = new List<string>();
+        var registered = new List<string>();
+        const string owned = "GachaOps-test-Daily-0800-Run";
+        ScheduledTaskRegistration.Reconcile(settings, Path.Combine(NewRoot(), "GachaOps.exe"), "test",
+            new Dictionary<string, string?> { [owned] = ScheduledTaskRegistration.Owner }, disabled.Add,
+            (name, _) => registered.Add(name));
+        Check(disabled.SequenceEqual(new[] { owned }) && registered.Count == 0,
+            "旧配置有冲突时停用已有任务，不能注册运行或提醒");
+        now = new DateTimeOffset(2026, 9, 24, 11, 55, 0, TimeSpan.Zero);
+        Check(ScheduledLaunch.Validate(settings, new("12:00", true, now), now, TimeZoneInfo.Utc, out _) is not null,
+            "冲突配置的遗留提醒入口也应拒绝");
+        settings.DailySchedules[1] = settings.DailySchedules[1] with { IsEnabled = false };
+        ScheduledTaskRegistration.Reconcile(settings, Path.Combine(NewRoot(), "GachaOps.exe"), "test",
+            new Dictionary<string, string?>(), disabled.Add, (name, _) => registered.Add(name));
+        Check(registered.Count == 4, "解决冲突后恢复两个运行和两个提醒");
+    }
+
     public static Task TimingAsync()
     {
         var now = new DateTimeOffset(2026, 9, 22, 8, 17, 0, TimeSpan.Zero);
@@ -210,10 +259,22 @@ internal static class ScheduledLaunchTests
         report = await ScheduledRunReport.SkipAsync(settings, request, "其他应用处于前台", root, history, notifications);
         Check(handler.Calls == 2 && report.Summary.Body.Contains("其他应用处于前台"), "前台占用也须发送跳过结果");
         settings.NotifyRunResult = false;
-        await ScheduledRunReport.SkipAsync(settings, request, "已锁屏", root, history, notifications);
+        report = await ScheduledRunReport.SkipAsync(settings, request, "已锁屏", root, history, notifications);
         Check(handler.Calls == 2, "结果开关独立");
+        Check(report.Persisted && report.Summary.Body.Contains("已锁屏") && report.Delivery.SkippedReason == "该类通知已关闭",
+            "通知时机关闭仍提供完整跳过结果供窗口显示");
         using (var entry = JsonDocument.Parse(File.ReadLines(journalPath).Last()))
             Check(entry.RootElement.GetProperty("Reason").GetString() == "该类通知已关闭", "关闭开关的静默结果必须可区分");
+        settings.NotificationsEnabled = false;
+        report = await ScheduledRunReport.SkipAsync(settings, request, "其他应用处于前台", root, history, notifications);
+        Check(handler.Calls == 2 && report.Persisted && report.Summary.Body.Contains("其他应用处于前台")
+            && report.Delivery.SkippedReason == "通知总开关关闭", "通知总开关关闭仍保留可显示的跳过原因");
+        settings.NotificationsEnabled = settings.NotifyRunResult = true;
+        using var failedClient = new HttpClient(new CaptureHandler(HttpStatusCode.ServiceUnavailable));
+        report = await ScheduledRunReport.SkipAsync(settings, request, "已有一轮运行或准备中", root, history,
+            new NotificationService(failedClient));
+        Check(report.Persisted && report.Summary.Body.Contains("已有一轮") && report.Delivery.Error is not null,
+            "发送失败不得丢失跳过结果，窗口可同时显示发送失败");
         var blockedRoot = Path.Combine(NewRoot(), "file");
         File.WriteAllText(blockedRoot, "cannot create directory here");
         report = await ScheduledRunReport.SkipAsync(settings, request, "前台变化", blockedRoot, new HistoryStore(blockedRoot), notifications);
@@ -227,13 +288,13 @@ internal static class ScheduledLaunchTests
         return root;
     }
 
-    private sealed class CaptureHandler : HttpMessageHandler
+    private sealed class CaptureHandler(HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
     {
         public int Calls;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Calls++;
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"code\":200}", Encoding.UTF8, "application/json") });
+            return Task.FromResult(new HttpResponseMessage(statusCode) { Content = new StringContent("{\"code\":200}", Encoding.UTF8, "application/json") });
         }
     }
 }

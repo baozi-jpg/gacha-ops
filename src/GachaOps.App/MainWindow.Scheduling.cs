@@ -15,17 +15,12 @@ public partial class MainWindow
     internal static string DataRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GachaOps");
     private readonly ObservableCollection<DailySchedule> _scheduleRows = [];
     private readonly ScheduledRequest? _initialScheduledRequest;
+    private readonly string? _initialScheduledBlock;
     private readonly bool _suppressStartupRun;
     private bool _scheduleReady;
     private bool _scheduleAdmissionBusy;
     private bool _initializationComplete;
-
-    internal void ShowScheduledFailure(WorkflowRunSummary summary)
-    {
-        _lastRunSummary = summary;
-        LastRunDetailsButton.IsEnabled = true;
-        ScheduleStatusText.Text = "定时触发记录失败，请查看本轮详情";
-    }
+    private int _scheduledSkipReports;
 
     private void InitializeScheduleControls()
     {
@@ -62,14 +57,22 @@ public partial class MainWindow
             ScheduleStatusText.Text = "该时刻已添加";
             return;
         }
-        _scheduleRows.Add(new(text));
-        await SaveSettingsFromControlsAsync();
+        var conflict = ScheduledLaunch.FindConflictingTime(_scheduleRows, text);
+        _scheduleRows.Add(new(text, IsEnabled: conflict is null));
+        if (await SaveSettingsFromControlsAsync() is not null && conflict is not null)
+            ScheduleStatusText.Text = $"已添加但未启用：与 {conflict} 间隔不足一小时";
     }
 
     private async void ScheduleRowToggle_Click(object sender, RoutedEventArgs e)
     {
         if (sender is CheckBox { DataContext: DailySchedule item } check)
         {
+            if (check.IsChecked == true && ScheduledLaunch.FindConflictingTime(_scheduleRows, item.Time) is { } conflict)
+            {
+                check.IsChecked = false;
+                ScheduleStatusText.Text = $"无法启用：与 {conflict} 间隔不足一小时";
+                return;
+            }
             _scheduleRows[_scheduleRows.IndexOf(item)] = item with { IsEnabled = check.IsChecked == true };
             await SaveSettingsFromControlsAsync();
         }
@@ -98,6 +101,11 @@ public partial class MainWindow
             var executable = Environment.ProcessPath ?? throw new InvalidOperationException("无法确定程序路径");
             var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("无法确认当前用户");
             ScheduledTaskRegistration.Synchronize(_settings, executable, sid);
+            if (_settings.ScheduledLaunchEnabled && ScheduledLaunch.SpacingBlock(_settings.DailySchedules) is { } conflict)
+            {
+                ScheduleStatusText.Text = $"定时已暂停：{conflict}";
+                return;
+            }
             _scheduleReady = true;
             ScheduleStatusText.Text = _settings.ScheduledLaunchEnabled
                 ? (_settings.DailySchedules.Any(item => item.IsEnabled) ? "定时已启用，关闭程序后仍有效" : "尚无已启用的时刻")
@@ -111,7 +119,7 @@ public partial class MainWindow
         }
     }
 
-    internal async Task HandleScheduledRequestAsync(ScheduledRequest request)
+    internal async Task HandleScheduledRequestAsync(ScheduledRequest request, string? initialBlock = null)
     {
         var reason = ScheduledLaunch.Validate(_settings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out var date);
         if (reason is null)
@@ -126,7 +134,7 @@ public partial class MainWindow
                 _crashLogStore.TryWrite("ScheduledClaim", exception);
             }
         }
-        reason ??= ScheduledLaunch.AdmissionBlock(_initializationComplete,
+        reason ??= initialBlock ?? ScheduledLaunch.AdmissionBlock(_initializationComplete,
             IsWorkflowEditingLocked || _scheduleAdmissionBusy, _scheduleReady, ScheduledDesktopGuard.Check());
         if (reason is not null)
         {
@@ -151,13 +159,32 @@ public partial class MainWindow
     private async Task ReportScheduledSkipAsync(ScheduledRequest request, string reason, bool currentRun = false)
     {
         var updateSummary = currentRun || !IsWorkflowEditingLocked;
-        var report = await ScheduledRunReport.SkipAsync(_settings, request, reason, DataRoot, _historyStore, _notifications);
-        if (updateSummary)
+        _scheduledSkipReports++;
+        UpdateWorkflowInteractionState();
+        var message = $"定时 {request.Time} 已跳过：{reason}";
+        ScheduleStatusText.Text = message;
+        RestoreWindowForInteraction();
+        try
         {
-            _lastRunSummary = report.Summary;
-            LastRunDetailsButton.IsEnabled = true;
-            ScheduleStatusText.Text = $"定时 {request.Time} 已跳过：{reason}";
+            var report = await ScheduledRunReport.SkipAsync(_settings, request, reason, DataRoot, _historyStore, _notifications);
+            if (_isClosing || Dispatcher.HasShutdownStarted) return;
+            if (updateSummary)
+            {
+                _lastRunSummary = report.Summary;
+                LastRunDetailsButton.IsEnabled = true;
+                SetFooter(message, System.Windows.Media.Color.FromRgb(255, 159, 10));
+            }
+            await RefreshHistoryAsync();
+            if (_isClosing || Dispatcher.HasShutdownStarted) return;
+            if (!report.Persisted) message += "\n历史保存失败，本次跳过未完整保存";
+            if (report.Delivery.Error is { } error) message += $"\n通知发送失败：{error}";
+            RestoreWindowForInteraction();
+            AppDialog.ShowModal(this, "定时未运行", message, AppDialogKind.Warning);
         }
-        if (!report.Persisted) RestoreWindowForInteraction();
+        finally
+        {
+            _scheduledSkipReports--;
+            if (!_isClosing) UpdateWorkflowInteractionState();
+        }
     }
 }
