@@ -649,7 +649,8 @@ public partial class MainWindow : Window
                 adapters,
                 workflowTasks,
                 settingsForRun,
-                preparationCancellation.Token);
+                preparationCancellation.Token,
+                _appCancellation.Token);
             _activePreparationTask = preparationTask;
             var preparation = await preparationTask;
             workflowRunId = preparation.WorkflowRunId;

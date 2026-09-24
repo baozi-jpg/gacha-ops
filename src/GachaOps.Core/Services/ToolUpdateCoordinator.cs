@@ -26,7 +26,8 @@ public sealed class ToolUpdateCoordinator
         IReadOnlyList<IAutomationAdapter> adapters,
         IReadOnlyList<WorkflowTaskSetting> workflowTasks,
         AppSettings settings,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        CancellationToken shutdownCancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(adapters);
         ArgumentNullException.ThrowIfNull(workflowTasks);
@@ -39,11 +40,14 @@ public sealed class ToolUpdateCoordinator
 
         try
         {
+            using var preparationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken, shutdownCancellationToken);
             return await PrepareCoreAsync(
                 adapters,
                 workflowTasks,
                 settings,
-                cancellationToken).ConfigureAwait(false);
+                preparationCancellation.Token,
+                shutdownCancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -55,7 +59,8 @@ public sealed class ToolUpdateCoordinator
         IReadOnlyList<IAutomationAdapter> adapters,
         IReadOnlyList<WorkflowTaskSetting> workflowTasks,
         AppSettings settings,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CancellationToken shutdownCancellationToken)
     {
         var startedAt = DateTimeOffset.Now;
         var workflowRunId = Guid.NewGuid();
@@ -382,7 +387,8 @@ public sealed class ToolUpdateCoordinator
                                 attempt.Task.ToolId,
                                 items,
                                 token),
-                            cancellationToken)))
+                            cancellationToken,
+                            shutdownCancellationToken)))
                         .ConfigureAwait(false);
                     var updateFailures = new List<Failure>();
                     var updateCancelled = false;
@@ -598,7 +604,8 @@ public sealed class ToolUpdateCoordinator
         ToolUpdatePersistentState state,
         SemaphoreSlim stateGate,
         Func<IReadOnlyList<string>, CancellationToken, Task> updateItemsChanged,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CancellationToken shutdownCancellationToken)
     {
         var context = new ToolUpdateExecutionContext(
             async (processId, processPath, _) =>
@@ -621,7 +628,8 @@ public sealed class ToolUpdateCoordinator
                     stateGate.Release();
                 }
             },
-            updateItemsChanged);
+            updateItemsChanged,
+            shutdownCancellationToken);
 
         try
         {

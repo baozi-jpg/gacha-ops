@@ -37,11 +37,16 @@ public sealed class ToolUpdateExecutionContext
 
     internal ToolUpdateExecutionContext(
         Func<int, string, CancellationToken, Task> processStarted,
-        Func<IReadOnlyList<string>, CancellationToken, Task> updateItemsChanged)
+        Func<IReadOnlyList<string>, CancellationToken, Task> updateItemsChanged,
+        CancellationToken shutdownCancellationToken = default)
     {
         _processStarted = processStarted;
         _updateItemsChanged = updateItemsChanged;
+        ShutdownCancellationToken = shutdownCancellationToken;
     }
+
+    // Cancelling a run must not abandon an already started external update.
+    internal CancellationToken ShutdownCancellationToken { get; }
 
     internal Task ProcessStartedAsync(
         int processId,
