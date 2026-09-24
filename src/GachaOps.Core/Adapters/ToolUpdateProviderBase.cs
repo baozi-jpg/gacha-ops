@@ -144,6 +144,8 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var shutdownToken = context.ShutdownCancellationToken;
+        shutdownToken.ThrowIfCancellationRequested();
         Process? process = null;
         try
         {
@@ -159,13 +161,13 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
 
             if (!StartsSelfUpdatingApplication)
             {
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(shutdownToken);
                 timeout.CancelAfter(_updateTimeout);
                 try
                 {
                     await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested
+                catch (OperationCanceledException) when (!shutdownToken.IsCancellationRequested
                                                         && timeout.IsCancellationRequested)
                 {
                     return ToolUpdateExecutionResult.Failure(
@@ -186,7 +188,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
                 check.TargetVersion,
                 startedAt,
                 process,
-                cancellationToken).ConfigureAwait(false);
+                shutdownToken).ConfigureAwait(false);
             if (fingerprint is null)
             {
                 return ToolUpdateExecutionResult.Failure(
@@ -194,21 +196,20 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
                     recoveryRequired: true);
             }
 
-            if (StartsSelfUpdatingApplication
-                && !await RequestNormalCloseAsync(settings, startedAt, cancellationToken).ConfigureAwait(false))
+            if (!await RequestNormalCloseAsync(settings, startedAt, shutdownToken).ConfigureAwait(false))
             {
                 return ToolUpdateExecutionResult.Failure(
                     $"{DisplayName} 已更新到 {fingerprint.Version}，但未能正常关闭；不会强制结束进程。",
                     recoveryRequired: true);
             }
 
-            fingerprint = await CaptureFingerprintAsync(settings, cancellationToken).ConfigureAwait(false);
+            fingerprint = await CaptureFingerprintAsync(settings, shutdownToken).ConfigureAwait(false);
             return ToolUpdateExecutionResult.Success(
                 $"{DisplayName} 已更新到 {fingerprint.Version}",
                 fingerprint,
                 [ToolCatalog.Get(Id).Name]);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
         {
             // Releasing our process handle leaves the external updater running. Retain its recovery record.
             return ToolUpdateExecutionResult.CancelledResult(
@@ -296,8 +297,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
                 $"{DisplayName} 上次更新仍未完成；相关进程不会被强制结束。");
         }
 
-        if (StartsSelfUpdatingApplication
-            && !await RequestNormalCloseAsync(settings, pending.StartedAt, cancellationToken).ConfigureAwait(false))
+        if (!await RequestNormalCloseAsync(settings, pending.StartedAt, cancellationToken).ConfigureAwait(false))
         {
             return ToolUpdateRecoveryResult.Failed(
                 $"{DisplayName} 上次更新已完成，但更新后进程未能正常关闭。");

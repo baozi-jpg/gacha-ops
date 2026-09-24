@@ -142,7 +142,11 @@ public sealed class MaaUpdateProvider : ToolUpdateProviderBase
 
             messages.Add(programResult.Message);
             updatedItems.Add("MAA 程序");
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // The program update has safely finished; do not start a new resource update.
+                return programResult with { UpdatedItems = updatedItems };
+            }
             resourcePlan = await _resourceModule.CheckAsync(settings.MaaPath, cancellationToken)
                 .ConfigureAwait(false);
         }

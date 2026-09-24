@@ -89,9 +89,16 @@ var tests = new (string Name, Func<Task> Run)[]
     ("版本检查屏障结束后跳过失败检查并继续可用更新", ToolUpdateCheckBarrierAsync),
     ("官方更新会并行执行", ToolUpdatesRunInParallelAsync),
     ("取消仍等待不可中断的本地写入安全收尾", ToolUpdateCancellationWaitsForStartedUpdatesAsync),
-    ("BetterGI 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.BetterGi, false)),
-    ("MAA 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.Maa, true)),
-    ("MaaEnd 更新和恢复等待可取消且保留进程", () => ExternalUpdateCancellationAsync(ToolId.MaaEnd, true)),
+    ("BetterGI 取消后等待更新并关闭应用", () => CancelledUpdateClosesApplicationAsync(ToolId.BetterGi, false)),
+    ("MAA 取消后等待更新并关闭应用", () => CancelledUpdateClosesApplicationAsync(ToolId.Maa, true)),
+    ("MaaEnd 取消后等待更新并关闭应用", () => CancelledUpdateClosesApplicationAsync(ToolId.MaaEnd, true)),
+    ("BetterGI 取消后更新超时保留进程和恢复记录", () => CancelledUpdateClosesApplicationAsync(ToolId.BetterGi, false, false)),
+    ("MAA 取消后更新超时保留进程和恢复记录", () => CancelledUpdateClosesApplicationAsync(ToolId.Maa, true, false)),
+    ("MaaEnd 取消后更新超时保留进程和恢复记录", () => CancelledUpdateClosesApplicationAsync(ToolId.MaaEnd, true, false)),
+    ("MAA 取消后完成程序收尾但不再更新资源", MaaCancelledProgramDoesNotStartResourceUpdateAsync),
+    ("BetterGI 关闭 Ops 和取消恢复均保留进程", () => ExternalUpdateCancellationAsync(ToolId.BetterGi, false)),
+    ("MAA 关闭 Ops 和取消恢复均保留进程", () => ExternalUpdateCancellationAsync(ToolId.Maa, true)),
+    ("MaaEnd 关闭 Ops 和取消恢复均保留进程", () => ExternalUpdateCancellationAsync(ToolId.MaaEnd, true)),
     ("更新结果保存失败阻止整轮并保留恢复点", UpdateStateSaveFailureRetainsEvidenceAsync),
     ("不确定安装阻止整轮并保留任务身份", UncertainInstallationsAreExcludedAsync),
     ("全部准备失败仍有完整历史和一次结束提醒", AllPreparationFailuresRetainHistoryAsync),
@@ -282,7 +289,7 @@ var tests = new (string Name, Func<Task> Run)[]
 if (args.Contains("--cancellation-stress", StringComparer.Ordinal))
 {
     var cancellationTests = tests.Where(test =>
-        test.Name.Contains("更新和恢复等待可取消且保留进程", StringComparison.Ordinal)).ToArray();
+        test.Name.Contains("关闭 Ops 和取消恢复均保留进程", StringComparison.Ordinal)).ToArray();
     tests = Enumerable.Range(0, 50).SelectMany(_ => cancellationTests).ToArray();
 }
 
@@ -1894,6 +1901,73 @@ static async Task ToolUpdatesRunInParallelAsync()
     Assert.True((await run).Succeeded, "两个并行更新正常结束后应继续工作流");
 }
 
+static async Task CancelledUpdateClosesApplicationAsync(ToolId toolId, bool selfUpdating, bool completeUpdate = true)
+{
+    using var area = TestArea.Create();
+    var executablePath = CreateCloseWindowExecutable(area);
+    var updaterPath = selfUpdating ? executablePath : area.File("BetterGI.update.exe");
+    if (!selfUpdating) File.Copy(executablePath, updaterPath);
+    var provider = new OwnershipTestUpdateProvider(executablePath,
+        completeUpdate ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(2))
+    {
+        TestToolId = toolId,
+        SelfUpdating = selfUpdating,
+        WaitForUpdateProcessExit = selfUpdating,
+        UpdateExecutablePath = updaterPath
+    };
+    var store = new ToolUpdateStateStore(area.Root);
+    using var cancellation = new CancellationTokenSource();
+    var run = new ToolUpdateCoordinator([provider], store).PrepareAsync(
+        [new PreflightAdapter(toolId)], Workflow((toolId, 1)),
+        new AppSettings { UpdateToolsBeforeLaunch = true }, cancellation.Token);
+    Process? updater = null;
+    Process? restarted = null;
+    try
+    {
+        updater = Process.GetProcessById(await provider.ProcessRecorded.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        await WaitForMainWindowAsync(updater);
+        cancellation.Cancel();
+        await Task.Delay(150);
+        Assert.False(run.IsCompleted, "取消任务后仍须等待已启动的更新安全收尾");
+        Assert.False(updater.HasExited, "更新完成前不得关闭进程");
+
+        if (!completeUpdate)
+        {
+            var timedOut = await run.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(timedOut.Cancelled, "更新超时后仍应阻止已取消的工作流");
+            Assert.False(updater.HasExited, "超时不得强制结束更新进程");
+            Assert.True((await store.LoadAsync()).PendingUpdates.ContainsKey(toolId), "超时须保留恢复证据");
+            Assert.True(timedOut.Issues.Any(issue => issue.State == RunState.Failed), "收尾失败必须可见");
+            Assert.Equal(0, timedOut.RunnableTasks.Count, "超时不得启动任务");
+            return;
+        }
+
+        // Model an updater restarting the application after installing the target version.
+        restarted = StartCloseWindowProcess(executablePath);
+        await WaitForMainWindowAsync(restarted);
+        provider.CurrentVersion = "2.0.0";
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        Assert.False(run.IsCompleted, "目标版本稳定但更新进程未退出时不得提前完成");
+        Assert.False(restarted.HasExited, "更新进程未完成时不得关闭重启的应用");
+        _ = updater.CloseMainWindow();
+        await updater.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var result = await run.WaitAsync(TimeSpan.FromSeconds(8));
+        Assert.True(result.Cancelled, "完成更新后本轮仍须保持取消");
+        Assert.Equal(0, result.RunnableTasks.Count, "收尾后不得启动游戏任务");
+        Assert.True(restarted.HasExited, "更新完成后应正常关闭本轮更新启动的应用");
+        Assert.Equal(0, (await store.LoadAsync()).PendingUpdates.Count, "安全收尾后应清除恢复记录");
+        Assert.Equal(0, result.Warnings.Count, "成功收尾不应提示更新仍需确认");
+    }
+    finally
+    {
+        if (!selfUpdating) await EnsureCloseWindowProcessesExitedAsync(updaterPath);
+        await EnsureCloseWindowProcessesExitedAsync(executablePath);
+        await run;
+        updater?.Dispose();
+        restarted?.Dispose();
+    }
+}
+
 static async Task ExternalUpdateCancellationAsync(ToolId toolId, bool selfUpdating)
 {
     using var area = TestArea.Create();
@@ -1909,7 +1983,9 @@ static async Task ExternalUpdateCancellationAsync(ToolId toolId, bool selfUpdati
     var settings = new AppSettings { UpdateToolsBeforeLaunch = true };
     var workflow = Workflow((toolId, 1));
     using var cancellation = new CancellationTokenSource();
-    var run = coordinator.PrepareAsync([new PreflightAdapter(toolId)], workflow, settings, cancellation.Token);
+    using var shutdown = new CancellationTokenSource();
+    var run = coordinator.PrepareAsync([new PreflightAdapter(toolId)], workflow, settings,
+        cancellation.Token, shutdownCancellationToken: shutdown.Token);
     Task<ToolPreparationResult>? recovery = null;
     Process? process = null;
     try
@@ -1924,6 +2000,9 @@ static async Task ExternalUpdateCancellationAsync(ToolId toolId, bool selfUpdati
         await WaitForMainWindowAsync(process);
 
         cancellation.Cancel();
+        await Task.Delay(150);
+        Assert.False(run.IsCompleted, "取消本轮任务仍需监控更新");
+        shutdown.Cancel();
         var result = await run.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.True(result.Cancelled, "停止等待必须返回取消状态");
         Assert.Equal(0, result.RunnableTasks.Count, "取消后不得启动游戏任务");
@@ -3359,6 +3438,36 @@ static async Task MaaProgramAndResourceUpdatesAreSequencedAsync()
         "程序完成后应切换为 MAA 官方资源更新阶段");
     Assert.SequenceEqual(["MAA 程序", "MAA 官方资源"], result.UpdatedItems,
         "完成提示应包含本轮实际完成的程序和资源更新");
+}
+
+static async Task MaaCancelledProgramDoesNotStartResourceUpdateAsync()
+{
+    using var area = TestArea.Create();
+    using var cancellation = new CancellationTokenSource();
+    var resource = new FakeMaaResourceUpdateModule
+    {
+        CheckPlans = new Queue<MaaResourceUpdatePlan>(
+        [
+            new MaaResourceUpdatePlan(TestCommit('a'), OldResourceVersion, NewResourceVersion, true)
+        ])
+    };
+    var program = new FakeMaaProgramUpdateOperations
+    {
+        ProgramCheck = FakeToolUpdateProvider.Check(ToolId.Maa, true),
+        AfterUpdate = cancellation.Cancel
+    };
+    var provider = CreateTestMaaUpdateProvider(resource, program);
+    var settings = CreateTestMaaProviderSettings(area);
+    settings.UpdateToolsBeforeLaunch = true;
+    var store = new ToolUpdateStateStore(area.File("state-root"));
+    var result = await new ToolUpdateCoordinator([provider], store).PrepareAsync(
+        [new PreflightAdapter(ToolId.Maa)], Workflow((ToolId.Maa, 1)), settings, cancellation.Token);
+    Assert.True(result.Cancelled, "程序安全收尾后保持本轮取消");
+    Assert.Equal(1, program.UpdateCount, "程序更新应已完成");
+    Assert.Equal(1, resource.CheckCount, "取消后不得重新检查资源");
+    Assert.Equal(0, resource.AppliedPlans.Count, "取消后不得开始新的资源部署");
+    Assert.Equal(0, result.RunnableTasks.Count, "不得启动任务");
+    Assert.Equal(0, (await store.LoadAsync()).PendingUpdates.Count, "程序安全收尾不得遗留虚假的恢复记录");
 }
 
 static async Task MaaResourcePlanPinsExactCommitAsync()
@@ -9317,6 +9426,8 @@ file sealed class FakeMaaProgramUpdateOperations : IMaaProgramUpdateOperations
 
     public bool ProgramUpdated { get; private set; }
 
+    public Action? AfterUpdate { get; init; }
+
     public int ProgramCheckCount => Volatile.Read(ref _programCheckCount);
 
     public int UpdateCount => Volatile.Read(ref _updateCount);
@@ -9344,6 +9455,7 @@ file sealed class FakeMaaProgramUpdateOperations : IMaaProgramUpdateOperations
         Interlocked.Increment(ref _updateCount);
         _order?.Add("program-update");
         ProgramUpdated = true;
+        AfterUpdate?.Invoke();
         return Task.FromResult(ToolUpdateExecutionResult.Success(
             "MAA 程序更新完成",
             FakeToolUpdateProvider.Fingerprint(check.TargetVersion)));
@@ -9869,8 +9981,8 @@ file sealed class FixedStackException(string message, string stackTrace) : Excep
     public override string StackTrace => stackTrace;
 }
 
-file sealed class OwnershipTestUpdateProvider(string executablePath)
-    : ToolUpdateProviderBase(new StaticGitHubReleaseClient("2.0.0"), TimeSpan.FromSeconds(10))
+file sealed class OwnershipTestUpdateProvider(string executablePath, TimeSpan? updateTimeout = null)
+    : ToolUpdateProviderBase(new StaticGitHubReleaseClient("2.0.0"), updateTimeout ?? TimeSpan.FromSeconds(10))
 {
     public string CurrentVersion { get; set; } = "1.0.0";
 
@@ -9888,6 +10000,8 @@ file sealed class OwnershipTestUpdateProvider(string executablePath)
     public bool WaitForUpdateProcessExit { get; init; }
 
     public string? UpdateWorkerProcessPath { get; init; }
+
+    public string? UpdateExecutablePath { get; init; }
 
     public int ReadVersionCount { get; private set; }
 
@@ -9932,11 +10046,11 @@ file sealed class OwnershipTestUpdateProvider(string executablePath)
                 await context.ProcessStartedAsync(processId, processPath, token);
                 ProcessRecorded.TrySetResult(processId);
             },
-            context.ReportUpdateItemsAsync), cancellationToken);
+            context.ReportUpdateItemsAsync, context.ShutdownCancellationToken), cancellationToken);
 
     public override ProcessStartInfo BuildUpdateStartInfo(AppSettings settings)
     {
-        var startInfo = new ProcessStartInfo(executablePath)
+        var startInfo = new ProcessStartInfo(UpdateExecutablePath ?? executablePath)
         {
             UseShellExecute = false
         };
