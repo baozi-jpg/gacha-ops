@@ -634,14 +634,17 @@ public partial class MainWindow : Window
         string? summaryReason = null;
         string? completionWarning = null;
         var startNotified = 0;
+        var tasksStarted = 0;
+        string? skippedScheduledTime = null;
         var cancelledByUser = false;
         Task startNotification = Task.CompletedTask;
         void NotifyActualStart(ToolStatusUpdate update)
         {
+            if (update.State == RunState.Running) Interlocked.Exchange(ref tasksStarted, 1);
             if (scheduledRequest is not null && update.State == RunState.Running
                 && Interlocked.CompareExchange(ref startNotified, 1, 0) == 0)
                 startNotification = SendNotificationAsync(settingsForRun, RunNotificationKind.Started,
-                    "GachaOps · 开始运行", $"开始执行 {string.Join("、", workflowTasks.Select(task => ToolCatalog.Get(task.ToolId).Name))}", scheduledRequest.Time);
+                    "GachaOps · 已开始", string.Join("、", workflowTasks.Select(task => ToolCatalog.Get(task.ToolId).Name)), scheduledRequest.Time);
         }
         _queue.StatusChanged += NotifyActualStart;
         IReadOnlyList<ToolPreparationWarning> updateWarnings = [];
@@ -727,6 +730,7 @@ public partial class MainWindow : Window
             if (scheduledRequest is not null && ScheduledDesktopGuard.Check() is { } foregroundReason)
             {
                 summaryReason = $"定时已跳过：{foregroundReason}";
+                skippedScheduledTime = scheduledRequest.Time;
                 foreach (var task in preparation.RunnableTasks)
                     TrackHistoryWrite(new RunRecord
                     {
@@ -802,7 +806,8 @@ public partial class MainWindow : Window
             }
             await startNotification;
             _lastRunSummary = WorkflowRunSummary.Create(workflowRunId, startedAt, endedAt,
-                workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings);
+                workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings,
+                tasksStarted: Volatile.Read(ref tasksStarted) != 0, skippedScheduledTime: skippedScheduledTime);
             LastRunDetailsButton.IsEnabled = true;
             if (!cancelledByUser && !_stopAfterCurrentRequested)
             {
@@ -1718,7 +1723,7 @@ public partial class MainWindow : Window
         var now = DateTimeOffset.Now;
         _lastRunSummary = WorkflowRunSummary.Create(Guid.NewGuid(), now, now,
             WorkflowTaskPlan.CreateEnabledSnapshot(settings.WorkflowTasks ?? []), [],
-            QueueRunResult.NotAllPlannedTasksCompleted, true, reason);
+            QueueRunResult.NotAllPlannedTasksCompleted, true, reason, tasksStarted: false);
         LastRunDetailsButton.IsEnabled = true;
         await SendNotificationAsync(settings, RunNotificationKind.Result, _lastRunSummary.Title, _lastRunSummary.Body);
     }
@@ -1733,7 +1738,7 @@ public partial class MainWindow : Window
             if (settings is null) return;
             var name = channel == NotificationChannel.Bark ? "Bark" : "ntfy";
             var result = await _notifications.SendAsync(settings, RunNotificationKind.Test,
-                "GachaOps · 测试通知", $"{name} 通知测试，请确认手机是否收到。", _appCancellation.Token, channel);
+                "GachaOps · 测试通知", name, _appCancellation.Token, channel);
             NotificationService.RecordDelivery(RunNotificationKind.Test, result, DataRoot);
             if (!_isClosing)
                 AppDialog.ShowModal(this, "测试通知", result.Sent ? $"{name} 服务已接收，请检查手机。"

@@ -45,6 +45,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("慢渠道不阻止其他渠道且响应正文超时有界", NotificationChannelsTimeoutAsync),
     ("整轮汇总隔离身份并保留异常和日志", WorkflowSummaryIncludesFailuresAsync),
     ("整轮成功与缺失任务历史失败准确区分", WorkflowSummarySuccessPolicyAsync),
+    ("未启动推送去除公共原因和零耗时重复", NotificationSummaryTests.UnstartedAsync),
+    ("通知区分实际启动并合并失败和跳过项", NotificationSummaryTests.MixedAsync),
+    ("完成通知精简且保留更新警告和完整证据", NotificationSummaryTests.WarningsAsync),
+    ("通知短原因覆盖定时及工具边界且不外发诊断", NotificationSummaryTests.ReasonsAsync),
     ("联网失败后安装不安全时不启动其他更新", UnsafeInstallationBlocksOtherUpdatesAsync),
     ("任一预检失败立即阻止整轮准备", PreparationFailureBlocksWholeWorkflowAsync),
     ("未勾选的三个工具均能提前阻止准备", UnselectedRunningToolBlocksPreparationAsync),
@@ -685,9 +689,10 @@ static Task WorkflowSummaryIncludesFailuresAsync()
         [new() { ToolId = ToolId.Maa, IsEnabled = true, Channel = 2 }, new() { ToolId = ToolId.BetterGi, IsEnabled = true }],
         [record, record with { WorkflowRunId = Guid.NewGuid(), Message = "other-workflow" }],
         QueueRunResult.NotAllPlannedTasksCompleted, false, "启动被阻止");
-    Assert.True(summary.Title.Contains("需要检查"), "异常标题");
+    Assert.Equal("GachaOps · 运行异常", summary.Title, "异常标题");
     Assert.True(summary.Body.Contains("执行异常") && summary.Body.Contains("未运行"), "异常和缺失任务");
-    Assert.True(summary.Body.Contains("3分0秒") && summary.Body.Contains("2分0秒"), "整轮墙钟和各工具耗时");
+    Assert.False(summary.Body.Contains("分") || summary.Body.Contains("秒"), "异常推送不堆叠耗时");
+    Assert.True(summary.Details.Contains("3分0秒") && summary.Details.Contains("2分0秒"), "本地仍保留整轮和工具耗时");
     Assert.True(summary.Body.Contains("历史保存失败"), "持久化失败可见");
     Assert.False(summary.Body.Contains("轮次") || summary.Body.Contains("在 GachaOps 查看"), "通知不显示轮次码或详情引导");
     Assert.True(summary.Details.Contains(id.ToString()) && summary.Details.Contains("isolated error evidence"), "详情保留身份和日志");
@@ -703,15 +708,18 @@ static Task WorkflowSummarySuccessPolicyAsync()
     var record = new RunRecord { ToolId = ToolId.Maa, ToolName = "MAA", StartedAt = now, EndedAt = now,
         State = RunState.Succeeded, Message = "完成", WorkflowRunId = id };
     var summary = WorkflowRunSummary.Create(id, now, now, tasks, [record], QueueRunResult.AllPlannedTasksCompleted, true);
-    Assert.True(summary.Title.Contains("工具任务已完成"), "仅说明工具任务完成");
+    Assert.Equal("GachaOps · 任务已完成", summary.Title, "仅说明任务完成");
+    Assert.Equal("MAA · 0分0秒", summary.Body, "成功只列工具和一次总耗时");
     foreach (var state in new[] { RunState.Failed, RunState.TimedOut, RunState.CompletedWithErrors, RunState.Skipped, RunState.Cancelled })
         Assert.True(WorkflowRunSummary.Create(id, now, now, tasks, [record with { State = state }],
-            QueueRunResult.AllPlannedTasksCompleted, true).Title.Contains("需要检查"), "不因队列结果覆盖工具异常");
-    Assert.True(WorkflowRunSummary.Create(id, now, now, tasks, [], QueueRunResult.AllPlannedTasksCompleted, true).Title.Contains("需要检查"), "缺失记录不报成功");
-    Assert.True(WorkflowRunSummary.Create(id, now, now, tasks, [record], QueueRunResult.AllPlannedTasksCompleted, false).Title.Contains("需要检查"), "历史失败不报成功");
-    Assert.True(WorkflowRunSummary.Create(id, now, now, tasks,
+            QueueRunResult.AllPlannedTasksCompleted, true).Title == "GachaOps · 运行异常", "不因队列结果覆盖工具异常");
+    Assert.Equal("GachaOps · 运行异常", WorkflowRunSummary.Create(id, now, now, tasks, [], QueueRunResult.AllPlannedTasksCompleted, true).Title, "缺失记录不报成功");
+    Assert.Equal("GachaOps · 运行异常", WorkflowRunSummary.Create(id, now, now, tasks, [record], QueueRunResult.AllPlannedTasksCompleted, false).Title, "历史失败不报成功");
+    var priorFailure = WorkflowRunSummary.Create(id, now, now, tasks,
         [record with { State = RunState.Failed, Message = " earlier failure " }, record],
-        QueueRunResult.AllPlannedTasksCompleted, true).Body.Contains("earlier failure"), "同工具后续成功不能隐藏已有异常");
+        QueueRunResult.AllPlannedTasksCompleted, true);
+    Assert.Equal("MAA：失败", priorFailure.Body, "后续成功不能隐藏已有异常且不外发异常原文");
+    Assert.True(priorFailure.Details.Contains("earlier failure"), "本地保留原异常");
     return Task.CompletedTask;
 }
 

@@ -29,7 +29,8 @@ public static class ScheduledRunReport
             new CrashLogStore(root).TryWrite("ScheduledHistory", exception);
         }
         var summary = WorkflowRunSummary.Create(id, now, now, planned, records,
-            QueueRunResult.NotAllPlannedTasksCompleted, persisted, $"定时 {request.Time} 已跳过：{reason}");
+            QueueRunResult.NotAllPlannedTasksCompleted, persisted, $"定时 {request.Time} 已跳过：{reason}",
+            tasksStarted: false, skippedScheduledTime: request.Time);
         var delivery = await notifications.SendAsync(settings, RunNotificationKind.Result, summary.Title, summary.Body);
         NotificationService.RecordDelivery(RunNotificationKind.Result, delivery, root, request.Time);
         return (summary, persisted, delivery);

@@ -249,7 +249,9 @@ internal static class ScheduledLaunchTests
         var request = new ScheduledRequest("08:17", false, DateTimeOffset.Now);
         var report = await ScheduledRunReport.SkipAsync(settings, request, "已有一轮运行或准备中", root, history, notifications);
         Check(report.Persisted && (await history.ReadAllAsync()).Single().State == RunState.Skipped, "跳过记录准确");
-        Check(handler.Calls == 1 && report.Summary.Body.Contains("已有一轮"), "结果通知携带跳过原因");
+        Check(handler.Calls == 1 && report.Summary.Title == "GachaOps · 定时已跳过"
+            && report.Summary.Body == "08:17：已有任务进行中", "跳过推送只保留时刻和一次原因");
+        Check(handler.LastBody == report.Summary.Body, "精简正文实际发送给渠道");
         var journalPath = Path.Combine(root, "notifications.jsonl");
         using (var entry = JsonDocument.Parse(File.ReadLines(journalPath).Last()))
         {
@@ -261,7 +263,7 @@ internal static class ScheduledLaunchTests
         settings.NotifyRunResult = false;
         report = await ScheduledRunReport.SkipAsync(settings, request, "已锁屏", root, history, notifications);
         Check(handler.Calls == 2, "结果开关独立");
-        Check(report.Persisted && report.Summary.Body.Contains("已锁屏") && report.Delivery.SkippedReason == "该类通知已关闭",
+        Check(report.Persisted && report.Summary.Body.Contains("桌面不可用") && report.Delivery.SkippedReason == "该类通知已关闭",
             "通知时机关闭仍提供完整跳过结果供窗口显示");
         using (var entry = JsonDocument.Parse(File.ReadLines(journalPath).Last()))
             Check(entry.RootElement.GetProperty("Reason").GetString() == "该类通知已关闭", "关闭开关的静默结果必须可区分");
@@ -273,7 +275,7 @@ internal static class ScheduledLaunchTests
         using var failedClient = new HttpClient(new CaptureHandler(HttpStatusCode.ServiceUnavailable));
         report = await ScheduledRunReport.SkipAsync(settings, request, "已有一轮运行或准备中", root, history,
             new NotificationService(failedClient));
-        Check(report.Persisted && report.Summary.Body.Contains("已有一轮") && report.Delivery.Error is not null,
+        Check(report.Persisted && report.Summary.Body.Contains("已有任务进行中") && report.Delivery.Error is not null,
             "发送失败不得丢失跳过结果，窗口可同时显示发送失败");
         var blockedRoot = Path.Combine(NewRoot(), "file");
         File.WriteAllText(blockedRoot, "cannot create directory here");
@@ -291,10 +293,13 @@ internal static class ScheduledLaunchTests
     private sealed class CaptureHandler(HttpStatusCode statusCode = HttpStatusCode.OK) : HttpMessageHandler
     {
         public int Calls;
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        public string? LastBody;
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Calls++;
-            return Task.FromResult(new HttpResponseMessage(statusCode) { Content = new StringContent("{\"code\":200}", Encoding.UTF8, "application/json") });
+            using var payload = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            LastBody = payload.RootElement.GetProperty("body").GetString();
+            return new HttpResponseMessage(statusCode) { Content = new StringContent("{\"code\":200}", Encoding.UTF8, "application/json") };
         }
     }
 }
