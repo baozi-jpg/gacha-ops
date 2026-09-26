@@ -89,11 +89,10 @@ public partial class App : Application
             var loadResult = new SettingsStore().LoadAsync().GetAwaiter().GetResult();
             var settings = loadResult.Settings;
             // Capture before Show/Activate; our own window must not manufacture permission.
-            var initialBlock = request is null ? null
-                : ScheduledLaunch.Validate(settings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out _) ?? ScheduledDesktopGuard.Check();
-            var mainWindow = new MainWindow(settings, request, request is not null, initialBlock);
+            var initialForegroundBlock = request is null ? null : ScheduledDesktopGuard.Check();
+            var mainWindow = new MainWindow(settings, request, initialForegroundBlock);
             MainWindow = mainWindow;
-            if (initialBlock is null && (settings.MinimizeOnStartup || request is not null))
+            if (initialForegroundBlock is null && settings.MinimizeOnStartup)
             {
                 mainWindow.WindowState = WindowState.Minimized;
                 mainWindow.ShowActivated = false;
@@ -102,7 +101,10 @@ public partial class App : Application
             mainWindow.Show();
             ShutdownMode = ShutdownMode.OnMainWindowClose;
             _pipeListener = ScheduledInstancePipe.ListenAsync(PipeName,
-                incoming => Dispatcher.BeginInvoke(() => { _ = mainWindow.HandleScheduledRequestAsync(incoming); }), _pipeCancellation.Token);
+                incoming => Dispatcher.BeginInvoke(() =>
+                {
+                    _ = mainWindow.HandleScheduledRequestAsync(incoming, ScheduledDesktopGuard.Check());
+                }), _pipeCancellation.Token);
             if (loadResult.RecoveredFromCorruptSettings)
             {
                 AppDialog.ShowModal(

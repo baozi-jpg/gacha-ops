@@ -15,8 +15,7 @@ public partial class MainWindow
     internal static string DataRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GachaOps");
     private readonly ObservableCollection<DailySchedule> _scheduleRows = [];
     private readonly ScheduledRequest? _initialScheduledRequest;
-    private readonly string? _initialScheduledBlock;
-    private readonly bool _suppressStartupRun;
+    private readonly string? _initialScheduledForegroundBlock;
     private bool _scheduleReady;
     private bool _scheduleAdmissionBusy;
     private bool _initializationComplete;
@@ -119,7 +118,7 @@ public partial class MainWindow
         }
     }
 
-    internal async Task HandleScheduledRequestAsync(ScheduledRequest request, string? initialBlock = null)
+    internal async Task HandleScheduledRequestAsync(ScheduledRequest request, string? foregroundBlock)
     {
         var reason = ScheduledLaunch.Validate(_settings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out var date);
         if (reason is null)
@@ -134,8 +133,8 @@ public partial class MainWindow
                 _crashLogStore.TryWrite("ScheduledClaim", exception);
             }
         }
-        reason ??= initialBlock ?? ScheduledLaunch.AdmissionBlock(_initializationComplete,
-            IsWorkflowEditingLocked || _scheduleAdmissionBusy, _scheduleReady, ScheduledDesktopGuard.Check());
+        reason ??= ScheduledLaunch.AdmissionBlock(_initializationComplete,
+            IsWorkflowEditingLocked || _scheduleAdmissionBusy, _scheduleReady, foregroundBlock);
         if (reason is not null)
         {
             await ReportScheduledSkipAsync(request, reason);
