@@ -92,12 +92,11 @@ public partial class MainWindow : Window
     private int _displayedLogCharacters;
     private int _droppedPendingLogLines;
 
-    public MainWindow(AppSettings settings, ScheduledRequest? scheduledRequest = null, bool suppressStartupRun = false,
-        string? initialScheduledBlock = null)
+    public MainWindow(AppSettings settings, ScheduledRequest? scheduledRequest = null,
+        string? initialScheduledForegroundBlock = null)
     {
         _initialScheduledRequest = scheduledRequest;
-        _initialScheduledBlock = initialScheduledBlock;
-        _suppressStartupRun = suppressStartupRun;
+        _initialScheduledForegroundBlock = initialScheduledForegroundBlock;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         InitializeComponent();
         _adapters = ToolCatalog.CreateAdapters().ToDictionary(adapter => adapter.Id);
@@ -188,8 +187,9 @@ public partial class MainWindow : Window
             }
             RefreshScheduledRegistration();
             _initializationComplete = true;
-            if (_initialScheduledRequest is not null) await HandleScheduledRequestAsync(_initialScheduledRequest, _initialScheduledBlock);
-            else if (!_suppressStartupRun) await RunStartupWorkflowIfEnabledAsync();
+            if (_initialScheduledRequest is not null)
+                await HandleScheduledRequestAsync(_initialScheduledRequest, _initialScheduledForegroundBlock);
+            else await RunStartupWorkflowIfEnabledAsync();
         }
         catch (OperationCanceledException) when (_appCancellation.IsCancellationRequested)
         {
@@ -635,7 +635,6 @@ public partial class MainWindow : Window
         string? completionWarning = null;
         var startNotified = 0;
         var tasksStarted = 0;
-        string? skippedScheduledTime = null;
         var cancelledByUser = false;
         Task startNotification = Task.CompletedTask;
         void NotifyActualStart(ToolStatusUpdate update)
@@ -718,30 +717,12 @@ public partial class MainWindow : Window
             }
 
             if (preparation.RunnableTasks.Count > 0
-                && startedAutomatically && scheduledRequest is null && !await WaitForStartupRunDelayAsync())
+                && startedAutomatically && !await WaitForStartupRunDelayAsync())
             {
                 cancelledByUser = true;
                 summaryReason = "已取消本次自动运行";
                 historyPersisted = await WaitForHistoryWritesAsync();
                 SetFooter("已取消本次自动运行", Color.FromRgb(255, 159, 10));
-                return;
-            }
-
-            if (scheduledRequest is not null && ScheduledDesktopGuard.Check() is { } foregroundReason)
-            {
-                summaryReason = $"定时已跳过：{foregroundReason}";
-                skippedScheduledTime = scheduledRequest.Time;
-                foreach (var task in preparation.RunnableTasks)
-                    TrackHistoryWrite(new RunRecord
-                    {
-                        ToolId = task.ToolId, ToolName = ToolCatalog.Get(task.ToolId).Name, Channel = task.Channel,
-                        WorkflowRunId = workflowRunId, TaskExecutionId = Guid.NewGuid(),
-                        StartedAt = DateTimeOffset.Now, EndedAt = DateTimeOffset.Now, State = RunState.Skipped,
-                        Message = summaryReason
-                    });
-                historyPersisted = await WaitForHistoryWritesAsync();
-                SetFooter(summaryReason, Color.FromRgb(255, 159, 10));
-                completionWarning = historyPersisted ? summaryReason : $"{summaryReason}{Environment.NewLine}历史保存失败";
                 return;
             }
 
@@ -807,7 +788,7 @@ public partial class MainWindow : Window
             await startNotification;
             _lastRunSummary = WorkflowRunSummary.Create(workflowRunId, startedAt, endedAt,
                 workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings,
-                tasksStarted: Volatile.Read(ref tasksStarted) != 0, skippedScheduledTime: skippedScheduledTime);
+                tasksStarted: Volatile.Read(ref tasksStarted) != 0);
             LastRunDetailsButton.IsEnabled = true;
             if (!cancelledByUser && !_stopAfterCurrentRequested)
             {
