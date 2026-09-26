@@ -43,7 +43,7 @@ public partial class App : Application
                 else if (new ScheduledLaunchStore(GachaOps.App.MainWindow.DataRoot).TryClaim(request, date))
                 {
                     delivery = await new NotificationService().SendAsync(reminderSettings, RunNotificationKind.Reminder,
-                        "GachaOps · 定时提醒", $"计划于 {request.Time} 运行当前已启用任务（本机时间）。请保持登录、未锁屏并停留在桌面。");
+                        "GachaOps · 定时提醒", $"{request.Time} 开始运行");
                 }
                 else delivery = new(false, SkippedReason: "本次提醒已处理");
                 NotificationService.RecordDelivery(RunNotificationKind.Reminder, delivery, scheduledTime: request.Time);
@@ -69,7 +69,7 @@ public partial class App : Application
                     {
                         var settings = (await new SettingsStore().LoadAsync()).Settings;
                         var delivery = await new NotificationService().SendAsync(settings, RunNotificationKind.Result,
-                            "GachaOps · 定时状态待确认", $"定时 {request.Time} 转交未获确认，请检查已有实例。不会排队或重试，请查看本地诊断日志。");
+                            "GachaOps · 定时状态未确认", $"{request.Time}：请求未获确认");
                         NotificationService.RecordDelivery(RunNotificationKind.Result, delivery, scheduledTime: request.Time);
                     }
                     catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
