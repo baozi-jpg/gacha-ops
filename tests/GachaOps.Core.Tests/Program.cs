@@ -217,6 +217,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("历史追加拒绝新传入的过期记录", HistoryAppendRejectsExpiredIncomingRecordAsync),
     ("旧历史 JSONL 继续兼容", LegacyHistoryRemainsReadableAsync),
     ("历史残缺尾行后追加不会吞掉新记录", HistoryAppendAfterCorruptTailPreservesNewRecordAsync),
+    ("历史完整尾行无换行时追加保留新旧记录", HistoryAppendAfterValidUnterminatedTailPreservesRecordsAsync),
     ("历史 JSON null 行会被判为无效并移除", NullHistoryRowIsRemovedAsync),
     ("历史路径为目录时不能伪装成空历史", HistoryDirectoryPathThrowsAsync),
     ("历史损坏行和残缺尾行不影响有效记录", CorruptHistoryRowsDoNotAffectValidRecordsAsync),
@@ -5748,6 +5749,50 @@ static async Task HistoryAppendAfterCorruptTailPreservesNewRecordAsync()
         .Select(line => JsonSerializer.Deserialize<RunRecord>(line, options)!.Message);
     Assert.SequenceEqual(["旧有效记录", "新追加记录"], persisted,
         "历史快照应按原顺序保留旧记录并追加新记录");
+}
+
+static async Task HistoryAppendAfterValidUnterminatedTailPreservesRecordsAsync()
+{
+    foreach (var readBeforeAppend in new[] { false, true })
+    {
+        using var area = TestArea.Create();
+        var now = new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.FromHours(8));
+        var history = new HistoryStore(area.Root, new FixedTimeProvider(now));
+        Directory.CreateDirectory(Path.GetDirectoryName(history.HistoryPath)!);
+        var options = SettingsStore.CreateJsonOptions();
+        options.WriteIndented = false;
+        var existing = new RunRecord
+        {
+            ToolId = ToolId.BetterGi,
+            ToolName = "BetterGI",
+            StartedAt = now.AddHours(-2),
+            EndedAt = now.AddHours(-1),
+            State = RunState.Succeeded,
+            Message = "完整但无换行的旧记录",
+            LogExcerpt = Array.Empty<string>()
+        };
+        var appended = existing with
+        {
+            Id = Guid.NewGuid(),
+            StartedAt = now.AddMinutes(-1),
+            EndedAt = now,
+            Message = "新追加记录"
+        };
+        await File.WriteAllTextAsync(history.HistoryPath, JsonSerializer.Serialize(existing, options));
+
+        if (readBeforeAppend)
+        {
+            var before = await history.ReadAllAsync();
+            Assert.SequenceEqual([existing.Id], before.Select(record => record.Id),
+                "无换行的完整尾行应能正常读取");
+        }
+
+        await history.AppendAsync(appended);
+        var restarted = new HistoryStore(area.Root, new FixedTimeProvider(now));
+        var actual = await restarted.ReadAllAsync();
+        Assert.SequenceEqual([appended.Id, existing.Id], actual.Select(record => record.Id),
+            "无论追加前是否读取历史，新旧有效记录均不得因尾行无换行而丢失");
+    }
 }
 
 static async Task NullHistoryRowIsRemovedAsync()
