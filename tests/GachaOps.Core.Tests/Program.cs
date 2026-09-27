@@ -18,6 +18,12 @@ if (args.Contains("--bf01-close-window-helper", StringComparer.Ordinal))
     return;
 }
 
+if (args is ["--scheduled-claim-helper", var claimRoot])
+{
+    Environment.ExitCode = ScheduledLaunchTests.ClaimProcess(claimRoot);
+    return;
+}
+
 const string OldResourceVersion = MaaResourceTestData.OldVersion;
 const string NewResourceVersion = MaaResourceTestData.NewVersion;
 const string NewerResourceVersion = MaaResourceTestData.NewerVersion;
@@ -27,6 +33,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("定时间隔跨午夜及旧冲突配置阻断", ScheduledLaunchTests.SpacingAsync),
     ("定时窄窗口及跨日提醒", ScheduledLaunchTests.TimingAsync),
     ("定时持久认领防重与时钟回拨", ScheduledLaunchTests.ClaimsAsync),
+    ("定时认领写入中断保留旧记录", ScheduledLaunchTests.InterruptedClaimAsync),
+    ("定时认领拒绝已有空记录和损坏记录", ScheduledLaunchTests.InvalidClaimsAsync),
+    ("定时认领替换失败保留旧记录", ScheduledLaunchTests.ClaimReplaceFailureAsync),
+    ("定时认领跨进程互斥与原子替换防重", ScheduledLaunchTests.ConcurrentClaimsAsync),
     ("锁屏前台及忙碌准入", ScheduledLaunchTests.DesktopAsync),
     ("任务计划程序安全定义及路径迁移", ScheduledLaunchTests.TaskXmlAsync),
     ("隔离计划任务替身所有权与通知组合", ScheduledLaunchTests.RegistrationAsync),
@@ -297,6 +307,10 @@ if (args.Contains("--cancellation-stress", StringComparer.Ordinal))
         test.Name.Contains("关闭 Ops 和取消恢复均保留进程", StringComparison.Ordinal)).ToArray();
     tests = Enumerable.Range(0, 50).SelectMany(_ => cancellationTests).ToArray();
 }
+
+if (args.Contains("--scheduled-claims-only", StringComparer.Ordinal))
+    tests = tests.Where(test => test.Run.Method.DeclaringType == typeof(ScheduledLaunchTests)
+        && test.Name.Contains("认领", StringComparison.Ordinal)).ToArray();
 
 var failures = new List<string>();
 foreach (var test in tests)
