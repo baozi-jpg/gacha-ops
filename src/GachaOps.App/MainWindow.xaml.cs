@@ -69,6 +69,9 @@ public partial class MainWindow : Window
     private const int MaxDisplayedLogLineCharacters = 4000;
     private const double DragActivationDistance = 3;
     private AppSettings _settings;
+    private string _betterGiProfilesPath;
+    private string _maaProfilesPath;
+    private string _maaEndInstancesPath;
     private Task? _startupInitializationTask;
     private WorkflowTaskRow? _draggedRow;
     private Point _dragStartPoint;
@@ -98,6 +101,9 @@ public partial class MainWindow : Window
         _initialScheduledRequest = scheduledRequest;
         _initialScheduledForegroundBlock = initialScheduledForegroundBlock;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _betterGiProfilesPath = settings.BetterGiPath.Trim();
+        _maaProfilesPath = settings.MaaPath.Trim();
+        _maaEndInstancesPath = settings.MaaEndPath.Trim();
         InitializeComponent();
         _adapters = ToolCatalog.CreateAdapters().ToDictionary(adapter => adapter.Id);
         _toolUpdateCoordinator = new ToolUpdateCoordinator(
@@ -903,6 +909,21 @@ public partial class MainWindow : Window
     {
         if (CanAutoSaveSettings())
         {
+            if (sender is CheckBox { IsChecked: true })
+            {
+                Func<(int Count, string? Error)>? refresh = sender == UseBetterGiCheckBox ? RefreshBetterGiProfiles
+                    : sender == UseMaaCheckBox ? RefreshMaaProfiles
+                    : sender == UseMaaEndCheckBox ? RefreshMaaEndInstances
+                    : null;
+                if (refresh is not null)
+                {
+                    var result = RunWithSettingsAutoSaveSuppressed(refresh);
+                    if (result.Error is not null)
+                    {
+                        SetFooter(result.Error, Color.FromRgb(255, 59, 48));
+                    }
+                }
+            }
             await SaveSettingsFromControlsAsync();
         }
     }
@@ -941,6 +962,12 @@ public partial class MainWindow : Window
     private async Task<AppSettings?> SaveSettingsFromControlsAsync(
         string failureFooterText = SettingsSaveFailureFooterText)
     {
+        // Reconcile paths before taking any save/run snapshot, including saves from other controls.
+        var profileError = RunWithSettingsAutoSaveSuppressed(RefreshChangedProfilePaths);
+        if (profileError is not null)
+        {
+            SetFooter(profileError, Color.FromRgb(255, 59, 48));
+        }
         var targetWorkflowRevision = _workflowRevision;
         var settings = ReadNormalizedSettingsFromControls();
         _workflowSaveTimer.Stop();
@@ -1249,9 +1276,40 @@ public partial class MainWindow : Window
             betterGi.Error ?? maa.Error ?? maaEnd.Error);
     }
 
+    private string? RefreshChangedProfilePaths()
+    {
+        string? error = null;
+        if (!string.Equals(BetterGiPathTextBox.Text.Trim(), _betterGiProfilesPath, StringComparison.OrdinalIgnoreCase))
+        {
+            error = RefreshBetterGiProfiles().Error;
+        }
+        if (!string.Equals(MaaPathTextBox.Text.Trim(), _maaProfilesPath, StringComparison.OrdinalIgnoreCase))
+        {
+            error = RefreshMaaProfiles().Error ?? error;
+        }
+        if (!string.Equals(MaaEndPathTextBox.Text.Trim(), _maaEndInstancesPath, StringComparison.OrdinalIgnoreCase))
+        {
+            error = RefreshMaaEndInstances().Error ?? error;
+        }
+        return error;
+    }
+
+    private static void ResetProfilesForChangedPath(ComboBox comboBox, string path, ref string previousPath)
+    {
+        if (string.Equals(path, previousPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        // Even a matching profile name belongs to a different installation. Require a new selection.
+        RefreshCombo(comboBox, []);
+        previousPath = path;
+    }
+
     private (int Count, string? Error) RefreshMaaProfiles()
     {
         var maaPath = MaaPathTextBox.Text.Trim();
+        ResetProfilesForChangedPath(MaaProfileComboBox, maaPath, ref _maaProfilesPath);
         if (string.IsNullOrWhiteSpace(maaPath))
         {
             RefreshCombo(MaaProfileComboBox, []);
@@ -1264,6 +1322,7 @@ public partial class MainWindow : Window
     private (int Count, string? Error) RefreshMaaEndInstances()
     {
         var maaEndPath = MaaEndPathTextBox.Text.Trim();
+        ResetProfilesForChangedPath(MaaEndInstanceComboBox, maaEndPath, ref _maaEndInstancesPath);
         if (string.IsNullOrWhiteSpace(maaEndPath))
         {
             RefreshCombo(MaaEndInstanceComboBox, []);
@@ -1278,6 +1337,7 @@ public partial class MainWindow : Window
     private (int Count, string? Error) RefreshBetterGiProfiles()
     {
         var betterGiPath = BetterGiPathTextBox.Text.Trim();
+        ResetProfilesForChangedPath(BetterGiProfileComboBox, betterGiPath, ref _betterGiProfilesPath);
         if (string.IsNullOrWhiteSpace(betterGiPath))
         {
             RefreshCombo(BetterGiProfileComboBox, []);
