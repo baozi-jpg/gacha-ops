@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -132,6 +133,157 @@ internal static class ScheduledLaunchTests
         try { store.TryClaim(request, now.Date.AddDays(2)); throw new InvalidOperationException("损坏记录不可忽略"); }
         catch (JsonException) { }
         return Task.CompletedTask;
+    }
+
+    public static Task InterruptedClaimAsync()
+    {
+        var root = NewRoot();
+        var date = new DateTime(2026, 9, 27);
+        var request = new ScheduledRequest("08:17", false, new DateTimeOffset(date, TimeSpan.Zero));
+        var store = new ScheduledLaunchStore(root);
+        Check(store.TryClaim(request, date), "首次认领");
+        Check(store.TryClaim(request with { Reminder = true }, date), "保留已有提醒认领");
+        var path = Path.Combine(root, "scheduled-claims.json");
+        var previous = File.ReadAllBytes(path);
+        try
+        {
+            store.TryClaim(request, date.AddDays(1), (stream, _) =>
+            {
+                stream.Write("{\"08:17/False\":\"interrupted"u8);
+                stream.Flush();
+                throw new IOException("模拟写入中断");
+            });
+            throw new InvalidOperationException("保存失败不得返回认领成功");
+        }
+        catch (IOException) { }
+        Check(File.ReadAllBytes(path).SequenceEqual(previous), "写入中断必须保留原有有效认领记录");
+        Check(!new ScheduledLaunchStore(root).TryClaim(request, date), "失败后旧认领仍防重");
+        Check(!store.TryClaim(request, date.AddDays(-1)), "失败后仍防时钟回拨");
+        Check(!store.TryClaim(request with { Reminder = true }, date), "失败后提醒防重仍保留");
+        Check(new ScheduledLaunchStore(root).TryClaim(request, date.AddDays(1)), "下次保存应覆盖中断的临时文件");
+        return Task.CompletedTask;
+    }
+
+    public static Task InvalidClaimsAsync()
+    {
+        foreach (var content in new[] { "", "null", "broken" })
+        {
+            var root = NewRoot();
+            var path = Path.Combine(root, "scheduled-claims.json");
+            File.WriteAllText(path, content);
+            try
+            {
+                new ScheduledLaunchStore(root).TryClaim(new("08:17", false, DateTimeOffset.UtcNow), new(2026, 9, 27));
+                throw new InvalidOperationException("已有空记录或损坏记录不得重置后认领");
+            }
+            catch (Exception exception) when (exception is IOException or JsonException) { }
+            Check(File.ReadAllText(path) == content, "无效记录必须保留原文");
+        }
+        return Task.CompletedTask;
+    }
+
+    public static Task ClaimReplaceFailureAsync()
+    {
+        var root = NewRoot();
+        var date = new DateTime(2026, 9, 27);
+        var request = new ScheduledRequest("08:17", false, new DateTimeOffset(date, TimeSpan.Zero));
+        var store = new ScheduledLaunchStore(root);
+        Check(store.TryClaim(request, date), "首次认领");
+        var path = Path.Combine(root, "scheduled-claims.json");
+        var previous = File.ReadAllBytes(path);
+        // Allow the old record to be read, but deny its replacement after the scratch file is flushed.
+        using (var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            try
+            {
+                store.TryClaim(request, date.AddDays(1));
+                throw new InvalidOperationException("替换失败不得返回认领成功");
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+            Check(File.ReadAllBytes(path).SequenceEqual(previous), "替换失败必须保留旧记录");
+        }
+        Check(!store.TryClaim(request, date), "替换失败后仍防重");
+        Check(store.TryClaim(request, date.AddDays(1)), "解除占用后可保存下一轮");
+        return Task.CompletedTask;
+    }
+
+    public static async Task ConcurrentClaimsAsync()
+    {
+        var root = NewRoot();
+        var results = await ClaimProcessesAsync(root, 6);
+        Check(results.Count(result => result == "claimed") == 1, "独立进程并发认领必须恰好成功一次");
+        Check(results.All(result => result is "claimed" or "duplicate" or "busy"), "并发认领结果无效");
+        Check((await ClaimProcessesAsync(root, 1)).Single() == "duplicate", "替换文件后新进程仍须防重");
+
+        var store = new ScheduledLaunchStore(root);
+        var date = new DateTime(2026, 9, 27);
+        var request = new ScheduledRequest("08:17", true, new DateTimeOffset(date, TimeSpan.Zero));
+        Check(store.TryClaim(request, date, (stream, claims) =>
+        {
+            JsonSerializer.Serialize(stream, claims);
+            Check(ClaimProcessesAsync(root, 1).GetAwaiter().GetResult().Single() == "busy",
+                "提醒保存期间运行认领也必须被同一把锁排除");
+        }), "提醒与运行独立认领");
+        using (var held = new FileStream(Path.Combine(root, "scheduled-claims.json.lock"),
+            FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            Check((await ClaimProcessesAsync(root, 1)).Single() == "busy", "替换后锁身份不能改变");
+        Check(!store.TryClaim(request, date), "提醒不得重复认领");
+    }
+
+    public static int ClaimProcess(string root)
+    {
+        Console.WriteLine("ready");
+        if (Console.ReadLine() != "claim") return 1;
+        try
+        {
+            var date = new DateTime(2026, 9, 27);
+            var claimed = new ScheduledLaunchStore(root).TryClaim(
+                new("08:17", false, new DateTimeOffset(date, TimeSpan.Zero)), date);
+            Console.WriteLine(claimed ? "claimed" : "duplicate");
+        }
+        catch (IOException) { Console.WriteLine("busy"); }
+        return 0;
+    }
+
+    private static async Task<string[]> ClaimProcessesAsync(string root, int count)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var children = new List<Process>();
+        try
+        {
+            for (var index = 0; index < count; index++)
+            {
+                var start = new ProcessStartInfo(Environment.ProcessPath!)
+                {
+                    UseShellExecute = false, CreateNoWindow = true,
+                    RedirectStandardInput = true, RedirectStandardOutput = true
+                };
+                if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                    start.ArgumentList.Add(typeof(ScheduledLaunchTests).Assembly.Location);
+                start.ArgumentList.Add("--scheduled-claim-helper");
+                start.ArgumentList.Add(root);
+                children.Add(Process.Start(start) ?? throw new InvalidOperationException("测试子进程未启动"));
+            }
+            foreach (var child in children)
+                Check(await child.StandardOutput.ReadLineAsync(timeout.Token) == "ready", "测试子进程未就绪");
+            foreach (var child in children) await child.StandardInput.WriteLineAsync("claim");
+            var results = new List<string>();
+            foreach (var child in children)
+            {
+                results.Add(await child.StandardOutput.ReadLineAsync(timeout.Token) ?? "missing");
+                await child.WaitForExitAsync(timeout.Token);
+                Check(child.ExitCode == 0, "测试子进程异常退出");
+            }
+            return results.ToArray();
+        }
+        finally
+        {
+            foreach (var child in children)
+            {
+                if (!child.HasExited) child.Kill();
+                child.Dispose();
+            }
+        }
     }
 
     public static Task DesktopAsync()

@@ -75,22 +75,40 @@ public static class ScheduledLaunch
 
 public sealed class ScheduledLaunchStore(string root)
 {
-    // One small exclusive journal covers all processes, including reminder-only launches.
-    public bool TryClaim(ScheduledRequest request, DateTime date)
+    public bool TryClaim(ScheduledRequest request, DateTime date) =>
+        TryClaim(request, date, static (stream, claims) => JsonSerializer.Serialize(stream, claims));
+
+    // Keep write failures reproducible without touching user data or filling a disk.
+    internal bool TryClaim(ScheduledRequest request, DateTime date,
+        Action<Stream, Dictionary<string, DateTime>> writeClaims)
     {
         Directory.CreateDirectory(root);
-        using var stream = new FileStream(Path.Combine(root, "scheduled-claims.json"), FileMode.OpenOrCreate,
+        var path = Path.Combine(root, "scheduled-claims.json");
+        // Never replace or remove this lock: all processes must lock the same file identity.
+        using var claimLock = new FileStream(path + ".lock", FileMode.OpenOrCreate,
             FileAccess.ReadWrite, FileShare.None);
-        var claims = stream.Length == 0 ? new Dictionary<string, DateTime>()
-            : JsonSerializer.Deserialize<Dictionary<string, DateTime>>(stream)
+        Dictionary<string, DateTime> claims;
+        try
+        {
+            using var source = File.OpenRead(path);
+            claims = JsonSerializer.Deserialize<Dictionary<string, DateTime>>(source)
                 ?? throw new IOException("定时认领记录无效");
+        }
+        catch (FileNotFoundException)
+        {
+            claims = new();
+        }
         var key = $"{request.Time}/{request.Reminder}";
         if (claims.TryGetValue(key, out var last) && last >= date) return false;
         claims[key] = date;
-        stream.Position = 0;
-        JsonSerializer.Serialize(stream, claims);
-        stream.SetLength(stream.Position);
-        stream.Flush(flushToDisk: true);
+        // A failed/interrupted write leaves only this bounded scratch file; the next claim overwrites it.
+        var temporaryPath = path + ".tmp";
+        using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            writeClaims(stream, claims);
+            stream.Flush(flushToDisk: true);
+        }
+        File.Move(temporaryPath, path, overwrite: true);
         return true;
     }
 
