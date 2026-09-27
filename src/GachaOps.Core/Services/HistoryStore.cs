@@ -180,6 +180,13 @@ public sealed class HistoryStore
             }
         }
 
+        // ReadLineAsync also accepts a final line without a separator; appending to it would join two JSON values.
+        if (stream.Length > 0)
+        {
+            stream.Seek(-1, SeekOrigin.End);
+            rewriteRequired |= stream.ReadByte() is not ('\r' or '\n');
+        }
+
         return (retainedRecords, rewriteRequired);
     }
 
