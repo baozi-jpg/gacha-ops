@@ -60,7 +60,11 @@ public sealed class NotificationService(HttpClient? client = null)
         var endpoint = new Uri(server!, "push");
         var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
         {
-            Content = JsonContent.Create(new { device_key = bark.DeviceKey, title, body, group = "GachaOps" })
+            Content = JsonContent.Create(new
+            {
+                device_key = bark.DeviceKey, title, body, group = "GachaOps",
+                icon = "https://cdn.jsdelivr.net/gh/baozi-jpg/gacha-ops@main/src/GachaOps.App/Assets/GachaOps-notification.png"
+            })
         };
         return SendRequestAsync(request, NotificationChannel.Bark, null, cancellationToken);
     }

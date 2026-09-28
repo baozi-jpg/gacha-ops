@@ -395,6 +395,8 @@ static async Task BarkCustomEndpointAsync()
         using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
         Assert.Equal("test device", json.RootElement.GetProperty("device_key").GetString(), "解码密钥只在正文中");
         Assert.Equal("中文 & 内容", json.RootElement.GetProperty("body").GetString(), "正文无需路径编码");
+        Assert.Equal("https://cdn.jsdelivr.net/gh/baozi-jpg/gacha-ops@main/src/GachaOps.App/Assets/GachaOps-notification.png",
+            json.RootElement.GetProperty("icon").GetString(), "Bark 使用专属小图的 CDN 地址");
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"code\":200}") };
     }));
     var result = await new NotificationService(client).SendAsync(new AppSettings
