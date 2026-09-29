@@ -45,6 +45,8 @@ public sealed class AppSettings
 
     public NtfyNotificationSettings? Ntfy { get; set; }
 
+    public QqEmailNotificationSettings? QqEmail { get; set; }
+
     public List<WorkflowTaskSetting>? WorkflowTasks { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

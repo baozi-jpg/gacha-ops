@@ -29,6 +29,12 @@ const string NewResourceVersion = MaaResourceTestData.NewVersion;
 const string NewerResourceVersion = MaaResourceTestData.NewerVersion;
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("QQ 邮箱凭据加密往返损坏恢复与移除", QqEmailNotificationTests.CredentialsAsync),
+    ("QQ 邮箱固定 TLS 单收件人及中文纯文本", QqEmailNotificationTests.DeliveryAsync),
+    ("QQ 邮箱输入注入防护与通知开关", QqEmailNotificationTests.ValidationAndSwitchesAsync),
+    ("QQ 邮箱失败脱敏渠道隔离超时及取消", QqEmailNotificationTests.FailuresAsync),
+    ("QQ 邮箱审核样稿与 MIME 正文逐字匹配", QqEmailNotificationTests.SamplesAsync),
+    ("QQ 邮箱真实 TLS 拒绝不可信证书且不认证", QqEmailNotificationTests.CertificateAsync),
     ("每日定时设置与任意分钟选择", ScheduledLaunchTests.SettingsAsync),
     ("定时间隔跨午夜及旧冲突配置阻断", ScheduledLaunchTests.SpacingAsync),
     ("定时窄窗口及跨日提醒", ScheduledLaunchTests.TimingAsync),

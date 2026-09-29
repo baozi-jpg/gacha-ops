@@ -43,7 +43,7 @@ public partial class App : Application
                 else if (new ScheduledLaunchStore(GachaOps.App.MainWindow.DataRoot).TryClaim(request, date))
                 {
                     delivery = await new NotificationService().SendAsync(reminderSettings, RunNotificationKind.Reminder,
-                        "GachaOps · 定时提醒", $"{request.Time} 开始运行");
+                        "GachaOps · 定时提醒", NotificationService.ReminderBody(request.Time));
                 }
                 else delivery = new(false, SkippedReason: "本次提醒已处理");
                 NotificationService.RecordDelivery(RunNotificationKind.Reminder, delivery, scheduledTime: request.Time);

@@ -650,6 +650,7 @@
                                         <ComboBox x:Name="NotificationChannelComboBox" Width="112" SelectedIndex="0" AutomationProperties.Name="选择通知渠道">
                                             <ComboBoxItem x:Name="AddBarkChannelItem" Content="Bark" Tag="Bark" />
                                             <ComboBoxItem x:Name="AddNtfyChannelItem" Content="ntfy" Tag="Ntfy" />
+                                            <ComboBoxItem x:Name="AddQqEmailChannelItem" Content="QQ 邮箱" Tag="QqEmail" />
                                         </ComboBox>
                                         <Button x:Name="AddNotificationChannelButton" Content="添加渠道" Margin="12,0,0,0"
                                                 Style="{StaticResource SecondaryButton}" Click="AddNotificationChannel_Click" />
@@ -728,6 +729,49 @@
                                                      BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
                                                      AutomationProperties.Name="访问令牌（可选）" KeyDown="SettingsTextInput_KeyDown"
                                                      LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                    </Grid>
+                                </StackPanel>
+                                <StackPanel x:Name="QqEmailChannelPanel" Visibility="Collapsed" Margin="0,18,0,0">
+                                    <DockPanel LastChildFill="True">
+                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                            <CheckBox x:Name="QqEmailEnabledCheckBox" Content="使用" VerticalAlignment="Center"
+                                                      AutomationProperties.Name="启用 QQ 邮箱渠道" Click="SettingsToggle_Click" />
+                                            <Button Content="测试" Tag="QqEmail" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}"
+                                                    AutomationProperties.Name="测试 QQ 邮箱通知" Click="TestNotificationButton_Click" />
+                                            <Button Content="移除" Tag="QqEmail" Margin="8,0,0,0" Style="{StaticResource SecondaryButton}"
+                                                    AutomationProperties.Name="移除 QQ 邮箱渠道" Click="RemoveNotificationChannel_Click" />
+                                        </StackPanel>
+                                        <TextBlock DockPanel.Dock="Left" Text="QQ 邮箱" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        <Border Height="1" Background="{StaticResource DividerBrush}" Margin="12,0,16,0" VerticalAlignment="Center" />
+                                    </DockPanel>
+                                    <Grid Margin="0,12,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Text="发件邮箱" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="QqEmailSenderTextBox" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center"
+                                                 AutomationProperties.Name="QQ 发件邮箱" KeyDown="SettingsTextInput_KeyDown"
+                                                 LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock Grid.Row="1" Text="授权码" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <PasswordBox x:Name="QqEmailCodePasswordBox" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
+                                                     Height="42" Padding="12,0" VerticalContentAlignment="Center"
+                                                     Background="{StaticResource InputSurfaceBrush}" Foreground="{StaticResource PrimaryTextBrush}"
+                                                     BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
+                                                     AutomationProperties.Name="QQ 邮箱授权码" KeyDown="SettingsTextInput_KeyDown"
+                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock Grid.Row="2" Text="收件邮箱" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="QqEmailRecipientTextBox" Grid.Row="2" Grid.Column="1" VerticalAlignment="Center"
+                                                 AutomationProperties.Name="收件邮箱" KeyDown="SettingsTextInput_KeyDown"
+                                                 LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock x:Name="QqEmailCredentialError" Grid.Row="3" Grid.Column="1" Visibility="Collapsed"
+                                                   Text="授权码无法解密，请重新填写" TextWrapping="Wrap" />
                                     </Grid>
                                 </StackPanel>
                             </StackPanel>
