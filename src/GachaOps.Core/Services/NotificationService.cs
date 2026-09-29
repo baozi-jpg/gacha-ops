@@ -6,12 +6,12 @@ using GachaOps.Core.Models;
 namespace GachaOps.Core.Services;
 
 public enum RunNotificationKind { Reminder, Started, Result, Test }
-public enum NotificationChannel { Bark, Ntfy }
+public enum NotificationChannel { Bark, Ntfy, QqEmail }
 
 public sealed record NotificationDeliveryResult(bool Sent, string? Error = null, string? SkippedReason = null,
     NotificationChannel? Channel = null, IReadOnlyList<NotificationDeliveryResult>? Deliveries = null);
 
-public sealed class NotificationService(HttpClient? client = null)
+public sealed class NotificationService(HttpClient? client = null, MailKit.Net.Smtp.SmtpClient? emailClient = null)
 {
     private static readonly HttpClient DefaultClient = new(new HttpClientHandler { AllowAutoRedirect = false })
     {
@@ -19,6 +19,9 @@ public sealed class NotificationService(HttpClient? client = null)
     };
     public static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(5);
     public static readonly TimeSpan ReminderLeadTime = TimeSpan.FromMinutes(5);
+    public const string EmailTestBody = "这是一封邮件通知测试。";
+    public static string ReminderBody(string time) => $"计划于 {time} 开始运行。";
+    public static string StartedBody(IEnumerable<string> tools) => "本轮任务：" + string.Join("、", tools);
 
     public async Task<NotificationDeliveryResult> SendAsync(
         AppSettings settings, RunNotificationKind kind, string title, string body,
@@ -38,11 +41,13 @@ public sealed class NotificationService(HttpClient? client = null)
 
         var bark = settings.Bark ?? (string.IsNullOrWhiteSpace(settings.BarkAddress)
             ? null : MigrateBarkAddress(settings.BarkAddress));
-        var sends = new List<Task<NotificationDeliveryResult>>(2);
+        var sends = new List<Task<NotificationDeliveryResult>>(3);
         if ((channel is null or NotificationChannel.Bark) && bark is { IsEnabled: true })
             sends.Add(SendBarkAsync(bark, title, body, cancellationToken));
         if ((channel is null or NotificationChannel.Ntfy) && settings.Ntfy is { IsEnabled: true } ntfy)
             sends.Add(SendNtfyAsync(ntfy, title, body, cancellationToken));
+        if ((channel is null or NotificationChannel.QqEmail) && settings.QqEmail is { IsEnabled: true } email)
+            sends.Add(QqEmailNotificationService.SendAsync(email, title, body, cancellationToken, emailClient));
         if (sends.Count == 0)
             return new(false, SkippedReason: "尚无已启用的通知渠道", Channel: channel);
         var results = await Task.WhenAll(sends).ConfigureAwait(false);

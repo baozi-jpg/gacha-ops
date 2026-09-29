@@ -41,6 +41,8 @@ public sealed class SettingsStore
             }
 
             settings.Normalize();
+            if (settings.QqEmail is { } email)
+                settings.QqEmail = EmailCredentialProtection.Load(email);
             return new SettingsLoadResult(settings, RecoveredFromCorruptSettings: false);
         }
         catch (FileNotFoundException)
@@ -60,6 +62,8 @@ public sealed class SettingsStore
     public async Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default)
     {
         settings.Normalize();
+        if (settings.QqEmail is { } email)
+            settings.QqEmail = EmailCredentialProtection.PrepareForSave(email);
         var directory = Path.GetDirectoryName(_settingsPath)
             ?? throw new InvalidOperationException("设置路径没有父目录。");
         Directory.CreateDirectory(directory);
