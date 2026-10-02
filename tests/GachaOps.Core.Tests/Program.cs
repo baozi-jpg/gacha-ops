@@ -299,6 +299,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("配置发现区分成功有值和成功为空", ProfileDiscoveryDistinguishesSuccessfulCandidatesAndEmptyAsync),
     ("配置发现把存储缺失和访问错误返回为失败", ProfileDiscoveryReportsMissingAndUnreadableStorageAsync),
     ("配置发现拒绝损坏和错误 JSON 结构", ProfileDiscoveryRejectsInvalidJsonStructuresAsync),
+    ("BetterGI 所选配置拒绝损坏结构和无法读取", BetterGiProfileValidationAsync),
+    ("BetterGI 配置损坏阻止整轮准备并保留历史", BetterGiCorruptProfileBlocksWorkflowAsync),
     ("适配器对错误配置返回验证失败而不抛异常", AdapterValidationRejectsInvalidProfileConfigurationAsync),
     ("中文及空格参数保持独立", ArgumentsPreserveChineseAndSpacesAsync),
     ("路径失效会阻止启动", MissingPathIsRejectedAsync),
@@ -8813,6 +8815,80 @@ static async Task ProfileDiscoveryRejectsInvalidJsonStructuresAsync()
         await File.WriteAllTextAsync(Path.Combine(configDirectory, testCase.FileName), testCase.Json);
 
         AssertDiscoveryFailure(testCase.Discover(area.File("tool.exe")), testCase.Name);
+    }
+}
+
+static async Task BetterGiProfileValidationAsync()
+{
+    using var area = TestArea.Create();
+    var executable = area.File("bettergi-profile-validation-fixture.exe");
+    await File.WriteAllTextAsync(executable, string.Empty);
+    Directory.CreateDirectory(area.File("log"));
+    foreach (var mode in new[] { "OneDragon", "ScriptGroups" })
+    {
+        var directory = area.File(Path.Combine("User", mode == "OneDragon" ? "OneDragon" : "ScriptGroup"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "日常.json");
+        var settings = new AppSettings { BetterGiPath = executable, BetterGiMode = mode, BetterGiProfile = "日常" };
+        var adapter = new BetterGiAdapter();
+        foreach (var json in new[] { "", "{", "null", "[]", "\"日常\"", "42" })
+        {
+            await File.WriteAllTextAsync(path, json);
+            var validation = adapter.Validate(settings);
+            Assert.True(validation.Issues.Any(issue => issue.Contains("BetterGI", StringComparison.Ordinal)
+                && issue.Contains("配置", StringComparison.Ordinal) && !issue.Contains("不存在", StringComparison.Ordinal)),
+                $"{mode} 损坏或非对象配置必须在连接检查中被拒绝：{json}");
+        }
+
+        await File.WriteAllTextAsync(path, """{"未来字段":{"值":"保留兼容"}}""");
+        var valid = adapter.Validate(settings);
+        Assert.True(valid.IsValid, $"{mode} 可读对象配置保持兼容：{string.Join("；", valid.Issues)}");
+        await File.WriteAllTextAsync(path, "{/* 注释 */ \"未来字段\": true,}", new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        var compatible = adapter.Validate(settings);
+        Assert.True(compatible.IsValid, $"{mode} BOM、注释和尾逗号保持兼容：{string.Join("；", compatible.Issues)}");
+        using (var locked = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var unreadable = adapter.Validate(settings);
+            Assert.True(unreadable.Issues.Any(issue => issue.Contains("配置", StringComparison.Ordinal)
+                && issue.Contains("读取", StringComparison.Ordinal)), $"{mode} 无法读取的配置必须阻止启动");
+        }
+
+        if (mode == "ScriptGroups")
+        {
+            await File.WriteAllTextAsync(Path.Combine(directory, "周常.json"), "{");
+            settings.BetterGiProfile = "日常;周常";
+            var multiple = adapter.Validate(settings);
+            Assert.True(multiple.Issues.Any(issue => issue.Contains("周常", StringComparison.Ordinal)),
+                "多配置组必须检查每一个所选文件");
+        }
+    }
+}
+
+static async Task BetterGiCorruptProfileBlocksWorkflowAsync()
+{
+    using var area = TestArea.Create();
+    var executable = area.File("bettergi-corrupt-profile-fixture.exe");
+    await File.WriteAllTextAsync(executable, string.Empty);
+    Directory.CreateDirectory(area.File("log"));
+    var workflow = Workflow((ToolId.BetterGi, 1), (ToolId.Maa, 2));
+    foreach (var mode in new[] { "OneDragon", "ScriptGroups" })
+    {
+        var directory = area.File(Path.Combine("User", mode == "OneDragon" ? "OneDragon" : "ScriptGroup"));
+        Directory.CreateDirectory(directory);
+        await File.WriteAllTextAsync(Path.Combine(directory, "日常.json"), "{");
+        var settings = new AppSettings
+        {
+            BetterGiPath = executable, BetterGiMode = mode, BetterGiProfile = "日常", WorkflowTasks = workflow.ToList()
+        };
+        var preparation = await new ToolUpdateCoordinator([], new ToolUpdateStateStore(area.Root)).PrepareAsync(
+            [new BetterGiAdapter(), new PreflightAdapter(ToolId.Maa)], workflow, settings);
+        Assert.False(preparation.Succeeded, $"{mode} 损坏配置必须阻止整轮准备");
+        Assert.Equal(0, preparation.RunnableTasks.Count, "另一通道也不得进入启动");
+        Assert.Equal(2, preparation.HistoryRecords.Count, "保留配置失败和另一通道的未启动历史");
+        Assert.True(preparation.HistoryRecords.Any(record => record.ToolId == ToolId.BetterGi
+            && record.State == RunState.Failed && record.Message.Contains("配置", StringComparison.Ordinal)), "保留具体配置失败");
+        Assert.True(preparation.HistoryRecords.Any(record => record.ToolId == ToolId.Maa
+            && record.State == RunState.Skipped && record.WorkflowRunId == preparation.WorkflowRunId), "保留同一轮的跳过记录");
     }
 }
 

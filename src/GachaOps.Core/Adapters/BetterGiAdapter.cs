@@ -134,20 +134,36 @@ public sealed class BetterGiAdapter : ProcessAutomationAdapter
             foreach (var group in SplitGroups(settings.BetterGiProfile))
             {
                 var path = Path.Combine(root, "User", "ScriptGroup", $"{group}.json");
-                if (!File.Exists(path))
-                {
-                    issues.Add($"BetterGI 配置组不存在：{group}");
-                }
+                ValidateProfileConfiguration(path, group, "配置组", issues);
             }
 
             return;
         }
 
         var profilePath = Path.Combine(root, "User", "OneDragon", $"{settings.BetterGiProfile}.json");
-        if (!File.Exists(profilePath))
+        ValidateProfileConfiguration(profilePath, settings.BetterGiProfile, "一条龙配置", issues);
+    }
+
+    private static void ValidateProfileConfiguration(string path, string name, string kind, ICollection<string> issues)
+    {
+        var label = $"BetterGI {kind}";
+        try
         {
-            issues.Add($"BetterGI 一条龙配置不存在：{settings.BetterGiProfile}");
+            using var stream = File.OpenRead(path);
+            // Preserve BetterGI's support for comments and trailing commas; unknown fields remain its responsibility.
+            using var document = JsonDocument.Parse(stream, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip
+            });
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                issues.Add($"{label}文件结构无效：{name}");
         }
+        catch (FileNotFoundException) { issues.Add($"{label}不存在：{name}"); }
+        catch (DirectoryNotFoundException) { issues.Add($"{label}不存在：{name}"); }
+        catch (JsonException) { issues.Add($"{label}文件已损坏：{name}"); }
+        catch (IOException) { issues.Add($"{label}文件无法读取：{name}"); }
+        catch (UnauthorizedAccessException) { issues.Add($"{label}文件无法访问：{name}"); }
     }
 
     private static IReadOnlyList<string> SplitGroups(string value)

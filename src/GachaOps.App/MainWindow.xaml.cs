@@ -727,8 +727,28 @@ public partial class MainWindow : Window
             {
                 cancelledByUser = true;
                 summaryReason = "已取消本次自动运行";
+                var cancelledAt = DateTimeOffset.Now;
+                foreach (var task in preparation.RunnableTasks)
+                {
+                    var record = new RunRecord
+                    {
+                        ToolId = task.ToolId,
+                        ToolName = ToolCatalog.Get(task.ToolId).DisplayName,
+                        StartedAt = startedAt,
+                        EndedAt = cancelledAt,
+                        State = RunState.Cancelled,
+                        Message = summaryReason,
+                        WorkflowRunId = workflowRunId,
+                        TaskExecutionId = Guid.NewGuid(),
+                        Channel = task.Channel
+                    };
+                    TrackHistoryWrite(record);
+                    ApplyStatus(new ToolStatusUpdate(task.ToolId, record.State, record.Message,
+                        WorkflowRunId: workflowRunId, TaskExecutionId: record.TaskExecutionId, Channel: task.Channel));
+                }
                 historyPersisted = await WaitForHistoryWritesAsync();
-                SetFooter("已取消本次自动运行", Color.FromRgb(255, 159, 10));
+                SetFooter(historyPersisted ? "已取消本次自动运行" : "已取消本次自动运行，且历史保存失败",
+                    Color.FromRgb(255, 159, 10));
                 return;
             }
 

@@ -79,10 +79,26 @@ public partial class MainWindow
 
     private async void RemoveScheduleButton_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Button { DataContext: DailySchedule item })
+        if (CanAutoSaveSettings() && sender is Button { DataContext: DailySchedule item })
         {
-            _scheduleRows.Remove(item);
-            await SaveSettingsFromControlsAsync();
+            var index = _scheduleRows.IndexOf(item);
+            if (index < 0) return;
+            _isWorkflowLifecycleLocked = true;
+            UpdateWorkflowInteractionState();
+            try
+            {
+                _scheduleRows.RemoveAt(index);
+                if (await SaveSettingsFromControlsAsync() is null)
+                {
+                    _scheduleRows.Insert(index, item);
+                    ScheduleStatusText.Text = "设置保存失败，该时刻未移除";
+                }
+            }
+            finally
+            {
+                _isWorkflowLifecycleLocked = false;
+                UpdateWorkflowInteractionState();
+            }
         }
     }
 
