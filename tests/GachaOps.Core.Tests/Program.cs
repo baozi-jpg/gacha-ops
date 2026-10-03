@@ -12,6 +12,12 @@ using GachaOps.Core.Models;
 using GachaOps.Core.Services;
 
 Console.OutputEncoding = Encoding.UTF8;
+if (MaaEndUpdateWindowTests.IsHelper(args))
+{
+    Environment.ExitCode = MaaEndUpdateWindowTests.RunHelper(args);
+    return;
+}
+
 if (args.Contains("--bf01-close-window-helper", StringComparer.Ordinal))
 {
     Environment.ExitCode = CloseWindowProcessHelper.Run();
@@ -142,6 +148,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("自更新后由更新器拉起的新进程应被正常关闭", ToolUpdateClosesProcessRestartedByWorkerAsync),
     ("更新恢复后由外部更新器拉起的新进程应被正常关闭", ToolUpdateRecoveryClosesProcessRestartedByWorkerAsync),
     ("MaaEnd 更新恢复会重试暂缺版本的接口文件", MaaEndRecoveryRetriesIncompleteInterfaceWhileUpdaterRunsAsync),
+    ("MaaEnd 更新重启关闭真实窗口而非内部消息窗口", () => MaaEndWindowCloseAsync(true, false)),
+    ("MaaEnd 更新恢复关闭真实窗口而非内部消息窗口", () => MaaEndWindowCloseAsync(false, false)),
+    ("MaaEnd 更新恢复等待隐藏主窗口显示", () => MaaEndWindowCloseAsync(false, true)),
+    ("MaaEnd 更新恢复取消等待隐藏主窗口时保留进程", () => MaaEndWindowCloseAsync(false, true, true)),
 
     ("BetterGI 更新恢复拒绝跨安装路径", BetterGiRecoveryRejectsDifferentInstallationAsync),
     ("MaaEnd 更新恢复拒绝跨安装路径", MaaEndRecoveryRejectsDifferentInstallationAsync),
@@ -322,6 +332,11 @@ if (args.Contains("--scheduled-claims-only", StringComparer.Ordinal))
         && test.Name.Contains("认领", StringComparison.Ordinal)).ToArray();
 
 var failures = new List<string>();
+if (args.Contains("--maaend-window-close-only", StringComparer.Ordinal))
+    tests = tests.Where(test => test.Name.StartsWith("MaaEnd 更新", StringComparison.Ordinal)
+        && (test.Name.Contains("真实窗口", StringComparison.Ordinal)
+            || test.Name.Contains("隐藏主窗口", StringComparison.Ordinal))).ToArray();
+
 foreach (var test in tests)
 {
     try
@@ -2692,6 +2707,20 @@ static async Task ToolUpdateRecoveryWaitsForUpdaterExitAfterQuietFingerprintAsyn
         Assert.True(result.Fingerprint is not null, "恢复成功必须返回最终指纹");
         Assert.Equal(finalFingerprint.Sha256, result.Fingerprint!.Sha256,
             "恢复结果必须包含自更新进程退出前的最后一次写入");
+    }
+    finally
+    {
+        await EnsureCloseWindowProcessesExitedAsync(executablePath);
+    }
+}
+
+static async Task MaaEndWindowCloseAsync(bool updating, bool initiallyHidden, bool cancelWhileHidden = false)
+{
+    using var area = TestArea.Create();
+    var executablePath = CreateCloseWindowExecutable(area);
+    try
+    {
+        await MaaEndUpdateWindowTests.RunAsync(executablePath, updating, initiallyHidden, cancelWhileHidden);
     }
     finally
     {
