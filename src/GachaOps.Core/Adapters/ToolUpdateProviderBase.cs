@@ -649,6 +649,11 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
         return found;
     }
 
+    protected virtual void RequestNormalProcessClose(Process process)
+    {
+        _ = process.CloseMainWindow();
+    }
+
     private async Task<bool> RequestNormalCloseAsync(
         AppSettings settings, DateTimeOffset startedAt, CancellationToken cancellationToken)
     {
@@ -667,7 +672,7 @@ public abstract class ToolUpdateProviderBase : IToolUpdateProvider
             {
                 try
                 {
-                    _ = process.CloseMainWindow();
+                    RequestNormalProcessClose(process);
                 }
                 catch (InvalidOperationException)
                 {

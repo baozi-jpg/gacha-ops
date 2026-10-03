@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using GachaOps.Core.Models;
 using GachaOps.Core.Services;
@@ -41,6 +43,32 @@ public sealed class MaaEndUpdateProvider : ToolUpdateProviderBase
 
     protected override IReadOnlyList<string> GetFingerprintPaths(AppSettings settings) =>
         [settings.MaaEndPath, GetInterfacePath(settings)];
+
+    protected override void RequestNormalProcessClose(Process process)
+    {
+        var processId = process.Id;
+        _ = EnumWindows((window, parameter) =>
+        {
+            _ = GetWindowThreadProcessId(window, out var windowProcessId);
+            if (windowProcessId != processId || GetWindow(window, 4) != nint.Zero
+                || !IsWindowVisible(window) || !IsWindowEnabled(window))
+            {
+                return true;
+            }
+
+            var className = new StringBuilder(256);
+            _ = GetClassName(window, className, className.Capacity);
+            if (!string.Equals(className.ToString(), "Tauri Window", StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            // MainWindowHandle can select Tao's technically visible internal event window.
+            // Wait for MXU to show its actual window, then send only that window a normal close.
+            _ = PostMessage(window, 0x0010, nint.Zero, nint.Zero);
+            return false;
+        }, nint.Zero);
+    }
 
     public override ProcessStartInfo BuildUpdateStartInfo(AppSettings settings)
     {
@@ -115,6 +143,33 @@ public sealed class MaaEndUpdateProvider : ToolUpdateProviderBase
             issues.Add($"MaaEnd 启动设置读取失败：{exception.Message}");
         }
     }
+
+    private delegate bool EnumWindowCallback(nint window, nint parameter);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowCallback callback, nint parameter);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetWindow(nint window, uint command);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowEnabled(nint window);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(nint window, StringBuilder className, int capacity);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(nint window, uint message, nint wParam, nint lParam);
 
     private static string GetInterfacePath(AppSettings settings)
     {
