@@ -47,6 +47,8 @@ public sealed class AppSettings
 
     public QqEmailNotificationSettings? QqEmail { get; set; }
 
+    public QqNotificationSettings? Qq { get; set; }
+
     public List<WorkflowTaskSetting>? WorkflowTasks { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -78,6 +80,9 @@ public sealed class AppSettings
         if (Ntfy is { } ntfy)
             Ntfy = ntfy with { ServerAddress = ntfy.ServerAddress?.Trim() ?? string.Empty,
                 Topic = ntfy.Topic?.Trim() ?? string.Empty, AccessToken = ntfy.AccessToken?.Trim() ?? string.Empty };
+        if (Qq is { } qq)
+            Qq = qq with { AppId = qq.AppId?.Trim() ?? string.Empty,
+                UserOpenId = qq.UserOpenId?.Trim() ?? string.Empty, AppSecret = qq.AppSecret?.Trim() ?? string.Empty };
         BetterGiMode = string.Equals(BetterGiMode, "ScriptGroups", StringComparison.OrdinalIgnoreCase)
             ? "ScriptGroups"
             : "OneDragon";

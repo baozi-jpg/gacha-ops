@@ -35,6 +35,13 @@ const string NewResourceVersion = MaaResourceTestData.NewVersion;
 const string NewerResourceVersion = MaaResourceTestData.NewerVersion;
 var tests = new (string Name, Func<Task> Run)[]
 {
+    ("QQ 私聊密钥加密往返损坏恢复及移除", QqNotificationTests.CredentialsAsync),
+    ("QQ 官方私聊请求鉴权和中文正文", QqNotificationTests.DeliveryAsync),
+    ("QQ 输入网关限制及通知开关", QqNotificationTests.ValidationAndSwitchesAsync),
+    ("QQ 业务失败脱敏与其他渠道隔离", QqNotificationTests.FailuresAsync),
+    ("QQ 发送全程超时和绑定取消", QqNotificationTests.TimeoutAndCancellationAsync),
+    ("QQ 验证码绑定就绪私聊过滤分片及心跳", QqNotificationTests.BindingProtocolAsync),
+    ("QQ 绑定取消心跳故障和响应上限收尾", QqNotificationTests.BindingShutdownAsync),
     ("QQ 邮箱凭据加密往返损坏恢复与移除", QqEmailNotificationTests.CredentialsAsync),
     ("QQ 邮箱固定 TLS 单收件人及中文纯文本", QqEmailNotificationTests.DeliveryAsync),
     ("QQ 邮箱输入注入防护与通知开关", QqEmailNotificationTests.ValidationAndSwitchesAsync),
@@ -325,6 +332,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("设置与历史能够恢复", SettingsAndHistoryRoundTripAsync),
     ("集中工具目录可创建全部适配器", ToolCatalogCreatesAllAdaptersAsync)
 };
+
+if (args.Contains("--qq-notifications-only", StringComparer.Ordinal))
+    tests = tests.Where(test => test.Run.Method.DeclaringType == typeof(QqNotificationTests)).ToArray();
 
 if (args.Contains("--cancellation-stress", StringComparer.Ordinal))
 {
