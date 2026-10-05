@@ -1,5 +1,21 @@
 namespace GachaOps.Core.Models;
 
+public sealed record QqNotificationSettings
+{
+    public bool IsEnabled { get; init; } = true;
+    public string AppId { get; init; } = string.Empty;
+    public string UserOpenId { get; init; } = string.Empty;
+    public string ProtectedAppSecret { get; init; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string AppSecret { get; init; } = string.Empty;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool CredentialUnavailable { get; init; }
+
+    public override string ToString() => "QQ notification settings";
+}
+
 public sealed record QqEmailNotificationSettings
 {
     public bool IsEnabled { get; init; } = true;

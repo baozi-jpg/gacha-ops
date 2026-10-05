@@ -43,6 +43,8 @@ public sealed class SettingsStore
             settings.Normalize();
             if (settings.QqEmail is { } email)
                 settings.QqEmail = EmailCredentialProtection.Load(email);
+            if (settings.Qq is { } qq)
+                settings.Qq = QqCredentialProtection.Load(qq);
             return new SettingsLoadResult(settings, RecoveredFromCorruptSettings: false);
         }
         catch (FileNotFoundException)
@@ -64,6 +66,8 @@ public sealed class SettingsStore
         settings.Normalize();
         if (settings.QqEmail is { } email)
             settings.QqEmail = EmailCredentialProtection.PrepareForSave(email);
+        if (settings.Qq is { } qq)
+            settings.Qq = QqCredentialProtection.PrepareForSave(qq);
         var directory = Path.GetDirectoryName(_settingsPath)
             ?? throw new InvalidOperationException("设置路径没有父目录。");
         Directory.CreateDirectory(directory);

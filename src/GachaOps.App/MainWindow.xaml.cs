@@ -1035,6 +1035,7 @@ public partial class MainWindow : Window
         }
         ClearSettingsSaveFailureFooter();
         QqEmailCredentialError.Visibility = settings.QqEmail?.CredentialUnavailable == true ? Visibility.Visible : Visibility.Collapsed;
+        QqCredentialError.Visibility = settings.Qq?.CredentialUnavailable == true ? Visibility.Visible : Visibility.Collapsed;
         return settings;
     }
 
@@ -1083,6 +1084,7 @@ public partial class MainWindow : Window
                && left.Bark == right.Bark
                && left.Ntfy == right.Ntfy
                && left.QqEmail == right.QqEmail
+               && left.Qq == right.Qq
                && left.NoLogTimeoutMinutes == right.NoLogTimeoutMinutes
                && left.HardTimeoutMinutes == right.HardTimeoutMinutes
                && (left.WorkflowTasks ?? []).SequenceEqual(right.WorkflowTasks ?? []);
@@ -1141,6 +1143,16 @@ public partial class MainWindow : Window
                 ProtectedAuthorizationCode = _settings.QqEmail?.ProtectedAuthorizationCode ?? string.Empty,
                 CredentialUnavailable = _settings.QqEmail?.CredentialUnavailable == true
                     && string.IsNullOrEmpty(QqEmailCodePasswordBox.Password)
+            } : null,
+            Qq = QqChannelPanel.Visibility == Visibility.Visible ? new()
+            {
+                IsEnabled = QqEnabledCheckBox.IsChecked == true,
+                AppId = QqAppIdTextBox.Text.Trim(),
+                UserOpenId = QqUserOpenIdTextBox.Text.Trim(),
+                AppSecret = QqAppSecretPasswordBox.Password,
+                ProtectedAppSecret = _settings.Qq?.ProtectedAppSecret ?? string.Empty,
+                CredentialUnavailable = _settings.Qq?.CredentialUnavailable == true
+                    && string.IsNullOrEmpty(QqAppSecretPasswordBox.Password)
             } : null,
             WorkflowTasks = ReadSelectedWorkflow(),
             NoLogTimeoutMinutes = noLogMinutes,
@@ -1804,6 +1816,7 @@ public partial class MainWindow : Window
     private async void TestNotificationButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button || !Enum.TryParse<NotificationChannel>(button.Tag as string, out var channel)) return;
+        if (channel == NotificationChannel.Qq && _qqBindingCancellation is not null) return;
         button.IsEnabled = false;
         try
         {
@@ -1811,7 +1824,12 @@ public partial class MainWindow : Window
             if (settings is null) return;
             var name = NotificationChannelName(channel);
             var result = await _notifications.SendAsync(settings, RunNotificationKind.Test,
-                "GachaOps · 测试通知", channel == NotificationChannel.QqEmail ? NotificationService.EmailTestBody : name,
+                "GachaOps · 测试通知", channel switch
+                {
+                    NotificationChannel.QqEmail => NotificationService.EmailTestBody,
+                    NotificationChannel.Qq => NotificationService.QqTestBody,
+                    _ => name
+                },
                 _appCancellation.Token, channel);
             NotificationService.RecordDelivery(RunNotificationKind.Test, result, DataRoot);
             if (!_isClosing)
@@ -1819,7 +1837,7 @@ public partial class MainWindow : Window
                     ? "邮件服务器已接收，请检查收件箱" : $"{name} 服务已接收，请检查手机。")
                     : result.Error ?? result.SkippedReason ?? "请先启用通知。", result.Sent ? AppDialogKind.Information : AppDialogKind.Warning);
         }
-        finally { button.IsEnabled = true; }
+        finally { button.IsEnabled = channel != NotificationChannel.Qq || _qqBindingCancellation is null; }
     }
 
     private static string NotificationChannelName(NotificationChannel channel) => channel switch
@@ -1827,6 +1845,7 @@ public partial class MainWindow : Window
         NotificationChannel.Bark => "Bark",
         NotificationChannel.Ntfy => "ntfy",
         NotificationChannel.QqEmail => "QQ 邮箱",
+        NotificationChannel.Qq => "QQ",
         _ => throw new ArgumentOutOfRangeException(nameof(channel))
     };
 
@@ -1847,6 +1866,12 @@ public partial class MainWindow : Window
         QqEmailRecipientTextBox.Text = _settings.QqEmail?.RecipientAddress ?? string.Empty;
         QqEmailCodePasswordBox.Password = _settings.QqEmail?.AuthorizationCode ?? string.Empty;
         QqEmailCredentialError.Visibility = _settings.QqEmail?.CredentialUnavailable == true ? Visibility.Visible : Visibility.Collapsed;
+        QqChannelPanel.Visibility = _settings.Qq is null ? Visibility.Collapsed : Visibility.Visible;
+        QqEnabledCheckBox.IsChecked = _settings.Qq?.IsEnabled ?? true;
+        QqAppIdTextBox.Text = _settings.Qq?.AppId ?? string.Empty;
+        QqAppSecretPasswordBox.Password = _settings.Qq?.AppSecret ?? string.Empty;
+        QqUserOpenIdTextBox.Text = _settings.Qq?.UserOpenId ?? string.Empty;
+        QqCredentialError.Visibility = _settings.Qq?.CredentialUnavailable == true ? Visibility.Visible : Visibility.Collapsed;
         RefreshNotificationChannelChoices();
     }
 
@@ -1855,9 +1880,11 @@ public partial class MainWindow : Window
         AddBarkChannelItem.IsEnabled = BarkChannelPanel.Visibility != Visibility.Visible;
         AddNtfyChannelItem.IsEnabled = NtfyChannelPanel.Visibility != Visibility.Visible;
         AddQqEmailChannelItem.IsEnabled = QqEmailChannelPanel.Visibility != Visibility.Visible;
+        AddQqChannelItem.IsEnabled = QqChannelPanel.Visibility != Visibility.Visible;
         NotificationChannelComboBox.SelectedItem = AddBarkChannelItem.IsEnabled ? AddBarkChannelItem
             : AddNtfyChannelItem.IsEnabled ? AddNtfyChannelItem
-            : AddQqEmailChannelItem.IsEnabled ? AddQqEmailChannelItem : null;
+            : AddQqEmailChannelItem.IsEnabled ? AddQqEmailChannelItem
+            : AddQqChannelItem.IsEnabled ? AddQqChannelItem : null;
         AddNotificationChannelButton.IsEnabled = NotificationChannelComboBox.SelectedItem is not null;
         NotificationChannelComboBox.IsEnabled = AddNotificationChannelButton.IsEnabled;
     }
@@ -1868,6 +1895,7 @@ public partial class MainWindow : Window
         if (item == AddBarkChannelItem) BarkChannelPanel.Visibility = Visibility.Visible;
         else if (item == AddNtfyChannelItem) NtfyChannelPanel.Visibility = Visibility.Visible;
         else if (item == AddQqEmailChannelItem) QqEmailChannelPanel.Visibility = Visibility.Visible;
+        else if (item == AddQqChannelItem) QqChannelPanel.Visibility = Visibility.Visible;
         RefreshNotificationChannelChoices();
         await SaveSettingsFromControlsAsync();
     }
@@ -1892,6 +1920,17 @@ public partial class MainWindow : Window
             NtfyServerTextBox.Text = "https://ntfy.sh";
             NtfyTopicTextBox.Text = string.Empty;
             NtfyTokenPasswordBox.Password = string.Empty;
+        }
+        else if (channel == NotificationChannel.Qq)
+        {
+            _qqBindingCancellation?.Cancel();
+            QqChannelPanel.Visibility = Visibility.Collapsed;
+            QqEnabledCheckBox.IsChecked = true;
+            QqAppIdTextBox.Text = string.Empty;
+            QqUserOpenIdTextBox.Text = string.Empty;
+            QqAppSecretPasswordBox.Password = string.Empty;
+            QqCredentialError.Visibility = Visibility.Collapsed;
+            QqBindingStatus.Text = string.Empty;
         }
         else
         {

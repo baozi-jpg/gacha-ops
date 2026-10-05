@@ -651,6 +651,7 @@
                                             <ComboBoxItem x:Name="AddBarkChannelItem" Content="Bark" Tag="Bark" />
                                             <ComboBoxItem x:Name="AddNtfyChannelItem" Content="ntfy" Tag="Ntfy" />
                                             <ComboBoxItem x:Name="AddQqEmailChannelItem" Content="QQ 邮箱" Tag="QqEmail" />
+                                            <ComboBoxItem x:Name="AddQqChannelItem" Content="QQ" Tag="Qq" />
                                         </ComboBox>
                                         <Button x:Name="AddNotificationChannelButton" Content="添加渠道" Margin="12,0,0,0"
                                                 Style="{StaticResource SecondaryButton}" Click="AddNotificationChannel_Click" />
@@ -730,6 +731,57 @@
                                                      AutomationProperties.Name="访问令牌（可选）" KeyDown="SettingsTextInput_KeyDown"
                                                      LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
                                     </Grid>
+                                </StackPanel>
+                                <StackPanel x:Name="QqChannelPanel" Visibility="Collapsed" Margin="0,18,0,0">
+                                    <DockPanel LastChildFill="True">
+                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                            <CheckBox x:Name="QqEnabledCheckBox" Content="使用" VerticalAlignment="Center"
+                                                      AutomationProperties.Name="启用 QQ 渠道" Click="SettingsToggle_Click" />
+                                            <Button x:Name="QqTestNotificationButton" Content="测试" Tag="Qq" Margin="12,0,0,0"
+                                                    Style="{StaticResource SecondaryButton}" AutomationProperties.Name="测试 QQ 通知"
+                                                    Click="TestNotificationButton_Click" />
+                                            <Button x:Name="QqRemoveChannelButton" Content="移除" Tag="Qq" Margin="8,0,0,0"
+                                                    Style="{StaticResource SecondaryButton}" AutomationProperties.Name="移除 QQ 渠道"
+                                                    Click="RemoveNotificationChannel_Click" />
+                                        </StackPanel>
+                                        <TextBlock DockPanel.Dock="Left" Text="QQ" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center" />
+                                        <Border Height="1" Background="{StaticResource DividerBrush}" Margin="12,0,16,0" VerticalAlignment="Center" />
+                                    </DockPanel>
+                                    <Grid x:Name="QqConfigurationGrid" Margin="0,12,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="112" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="48" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Text="AppID" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="QqAppIdTextBox" Grid.Column="1" VerticalAlignment="Center"
+                                                 AutomationProperties.Name="QQ 机器人 AppID" KeyDown="SettingsTextInput_KeyDown"
+                                                 LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock Grid.Row="1" Text="AppSecret" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <PasswordBox x:Name="QqAppSecretPasswordBox" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
+                                                     Height="42" Padding="12,0" VerticalContentAlignment="Center"
+                                                     Background="{StaticResource InputSurfaceBrush}" Foreground="{StaticResource PrimaryTextBrush}"
+                                                     BorderBrush="{StaticResource DividerBrush}" BorderThickness="1"
+                                                     AutomationProperties.Name="QQ 机器人 AppSecret" KeyDown="SettingsTextInput_KeyDown"
+                                                     LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock Grid.Row="2" Text="用户 OpenID" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                        <TextBox x:Name="QqUserOpenIdTextBox" Grid.Row="2" Grid.Column="1" VerticalAlignment="Center"
+                                                 AutomationProperties.Name="QQ 用户 OpenID" KeyDown="SettingsTextInput_KeyDown"
+                                                 LostKeyboardFocus="SettingsTextInput_LostKeyboardFocus" />
+                                        <TextBlock x:Name="QqCredentialError" Grid.Row="3" Grid.Column="1" Visibility="Collapsed"
+                                                   Text="AppSecret 无法解密，请重新填写" TextWrapping="Wrap" />
+                                    </Grid>
+                                    <DockPanel Margin="0,8,0,0">
+                                        <Button x:Name="BindQqButton" DockPanel.Dock="Right" Content="绑定" Margin="12,0,0,0"
+                                                Style="{StaticResource SecondaryButton}" AutomationProperties.Name="绑定 QQ 用户 OpenID"
+                                                ToolTip="私聊机器人发送验证码，获取用户 OpenID" Click="BindQqButton_Click" />
+                                        <TextBlock x:Name="QqBindingStatus" VerticalAlignment="Center" TextWrapping="Wrap" />
+                                    </DockPanel>
                                 </StackPanel>
                                 <StackPanel x:Name="QqEmailChannelPanel" Visibility="Collapsed" Margin="0,18,0,0">
                                     <DockPanel LastChildFill="True">
