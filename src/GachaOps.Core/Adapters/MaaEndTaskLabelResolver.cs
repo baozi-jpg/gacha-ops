@@ -46,7 +46,7 @@ internal static class MaaEndTaskLabelResolver
         try
         {
             return Directory.Exists(tasksDirectory)
-                ? Directory.EnumerateFiles(tasksDirectory, "*.json", SearchOption.TopDirectoryOnly)
+                ? Directory.EnumerateFiles(tasksDirectory, "*.json", SearchOption.AllDirectories)
                     .OrderBy(path => path, StringComparer.Ordinal)
                     .ToArray()
                 : Array.Empty<string>();

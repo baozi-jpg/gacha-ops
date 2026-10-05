@@ -27,12 +27,6 @@ public abstract class ProcessAutomationAdapter : IAutomationAdapter
             issues.Add($"找不到 {DisplayName} 程序：{executablePath}");
         }
 
-        var source = GetLogSource(settings);
-        if (!Directory.Exists(source.DirectoryPath))
-        {
-            issues.Add($"找不到 {DisplayName} 日志目录：{source.DirectoryPath}");
-        }
-
         if (IsProcessRunning(settings))
         {
             issues.Add($"{DisplayName} 已经在运行，为避免重复任务不会再次启动。");
