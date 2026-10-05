@@ -267,6 +267,11 @@ var tests = new (string Name, Func<Task> Run)[]
     ("MaaEnd 当前自身停止标记可完成镜像日志运行", MaaEndCurrentSelfStopCompletesMirroredRunAsync),
     ("MaaEnd 日志轮换不会复用旧完成标记", MaaEndRotatedBackupDoesNotReuseOldSuccessAsync),
     ("MaaEnd 日志瞬时轮换仍会补读未消费尾部", MaaEndRotatedBackupReadsUnreadTailAsync),
+    ("MaaEnd 复制式轮换隔离旧错误并补读本轮尾部", MaaEndCopiedBackupReadsOnlyCurrentRunAsync),
+    ("三个工具清理日志后保留本轮结果", ToolLogCleanupPreservesCurrentRunAsync),
+    ("三个工具清理日志后仍读取已缓冲的无换行尾行", ToolLogCleanupFlushesBufferedCompletionAsync),
+    ("日志清理后同名重建不拼接旧尾行", RecreatedLogDoesNotJoinDeletedCarryAsync),
+    ("日志目录尚未生成不阻止工具预检", MissingLogDirectoryDoesNotBlockPreflightAsync),
     ("MaaEnd 配置退出自身时完成后等待进程正常退出", MaaEndCompletionWaitsForNormalExitAsync),
     ("MaaEnd 连接重试恢复及任务异常仍等待正常退出", MaaEndRetryRecoveryWaitsForNormalExitAsync),
     ("MaaEnd 连接重试不替代完成和正常退出证据", MaaEndRetryDoesNotImplyCompletionAsync),
@@ -274,6 +279,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("MaaEnd 应用完成证据不能覆盖异常退出", MaaEndAppCompletionRejectsAbnormalExitAsync),
     ("MaaEnd 失败任务映射为中文用户名称", MaaEndFailedTaskMapsToLocalizedUserNameAsync),
     ("MaaEnd 直接中文任务标签能够解析", MaaEndDirectTaskLabelIsResolvedAsync),
+    ("MaaEnd 子目录任务标签能够解析", MaaEndNestedTaskLabelIsResolvedAsync),
     ("MaaEnd 无效任务元数据安全退化为空明细", MaaEndInvalidTaskMetadataFallsBackWithoutDetailsAsync),
     ("MaaEnd 应用完成后任务失败记为执行异常", MaaEndTaskFailureChangesAppCompletionResultAsync),
     ("MaaEnd 忽略无进程来源的残缺重复事件", MaaEndMalformedDuplicateEventIsIgnoredAsync),
@@ -7004,6 +7010,170 @@ static async Task MaaEndAppCompletionRejectsAbnormalExitAsync()
     Assert.Equal(RunState.Failed, abnormalExit.State, "应用完成证据不能覆盖非零退出码");
 }
 
+static async Task MaaEndCopiedBackupReadsOnlyCurrentRunAsync()
+{
+    using var area = TestArea.Create();
+    var log = area.File("maafw.log");
+    await File.WriteAllTextAsync(log,
+        MaaEndTaskLine(100001, "Failed", 100000001, "OldRun") + Environment.NewLine);
+    var monitor = new LogMonitor();
+    var source = new LogSource(area.Root, "*.log", FollowRotatedFiles: true);
+    var checkpoint = monitor.Capture(source);
+    await File.AppendAllLinesAsync(log,
+    [
+        MaaEndTaskLine(219252, "Starting", 200000011, "AutoEssenceSchedule"),
+        MaaEndTaskLine(219252, "Succeeded", 200000011, "AutoEssenceSchedule")
+    ]);
+    File.Copy(log, area.File("maafw.bak.2026.10.05-10.20.26.957.log"));
+    await File.WriteAllTextAsync(log, "本轮新活动日志" + Environment.NewLine);
+    var result = await monitor.MonitorCoreAsync(
+        () => true, () => 0, DateTimeOffset.Now, source, checkpoint,
+        ObserveMaaEndMonitorLine, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2),
+        null, CancellationToken.None);
+    Assert.Equal(RunState.Succeeded, result.State, "复制备份不能重读旧失败");
+    Assert.False(result.LogExcerpt!.Any(line => line.Contains("OldRun", StringComparison.Ordinal)),
+        "本轮记录不得混入复制备份中的旧日志");
+    Assert.True(result.LogExcerpt!.Any(line => line.Contains("Tasker.Task.Succeeded", StringComparison.Ordinal)),
+        "复制备份中尚未读取的本轮终态必须补读");
+}
+
+static Task ToolLogCleanupPreservesCurrentRunAsync() => VerifyToolLogCleanupAsync(false);
+
+static Task ToolLogCleanupFlushesBufferedCompletionAsync() => VerifyToolLogCleanupAsync(true);
+
+static async Task VerifyToolLogCleanupAsync(bool completionWithoutNewline)
+{
+    foreach (var toolId in Enum.GetValues<ToolId>())
+    foreach (var scenario in new[] { "success", "internal-error", "abnormal-exit", "no-completion" })
+    {
+        using var area = TestArea.Create();
+        var logDirectory = Path.Combine(area.Root, toolId == ToolId.BetterGi ? "log" : "debug");
+        Directory.CreateDirectory(logDirectory);
+        var log = Path.Combine(logDirectory, toolId switch
+        {
+            ToolId.BetterGi => "better-genshin-impact20261005.log",
+            ToolId.Maa => "gui.log",
+            _ => "2026-10-05-1.log"
+        });
+        var completion = toolId switch
+        {
+            ToolId.BetterGi => "[INF] 一条龙任务结束",
+            ToolId.Maa => "[INF] 任务已全部完成！",
+            _ => "[INFO] kind: tasks-completed"
+        };
+        var failure = toolId switch
+        {
+            ToolId.BetterGi => "[ERR] 脚本执行异常: 当次子任务",
+            ToolId.Maa => "[INF] 任务出错: 当次子任务",
+            _ => MaaEndTaskLine(219252, "Failed", 200000011, "CurrentTaskMain")
+        };
+        var tasksDirectory = Path.Combine(area.Root, "tasks");
+        Directory.CreateDirectory(tasksDirectory);
+        await File.WriteAllTextAsync(Path.Combine(tasksDirectory, "current.json"),
+            """{"task":[{"entry":"CurrentTaskMain","label":"当次子任务"}]}""");
+        await File.WriteAllTextAsync(log, completion + Environment.NewLine);
+        var monitor = new LogMonitor();
+        var source = new LogSource(logDirectory,
+            toolId == ToolId.Maa ? "gui.log" : "*.log",
+            IncludeSubdirectories: toolId == ToolId.MaaEnd,
+            FollowRotatedFiles: toolId == ToolId.MaaEnd);
+        var checkpoint = monitor.Capture(source);
+        var lines = new List<string>();
+        if (scenario == "internal-error") lines.Add(failure);
+        if (!completionWithoutNewline && scenario != "no-completion") lines.Add(completion);
+        lines.Add("cleanup-ready");
+        var newContent = string.Join(Environment.NewLine, lines) + Environment.NewLine;
+        if (completionWithoutNewline && scenario != "no-completion") newContent += completion;
+        await File.AppendAllTextAsync(log, newContent);
+        using var handle = new AutomationRunHandle(
+            await StartExitedProcessAsync(scenario == "abnormal-exit" ? 7 : 0),
+            DateTimeOffset.Now, source, checkpoint);
+        ProcessAutomationAdapter adapter = toolId switch
+        {
+            ToolId.BetterGi => new BetterGiAdapter(monitor),
+            ToolId.Maa => new MaaAdapter(monitor),
+            _ => new MaaEndAdapter(monitor)
+        };
+        var result = await adapter.MonitorAsync(handle, new AppSettings
+        {
+            BetterGiPath = area.File("BetterGI.exe"),
+            MaaPath = area.File("MAA.exe"),
+            MaaEndPath = area.File("MaaEnd.exe")
+        }, new DirectProgress<string>(line =>
+        {
+            if (line == "cleanup-ready") File.Delete(log);
+        }), CancellationToken.None);
+        var expected = scenario switch
+        {
+            "success" => RunState.Succeeded,
+            "internal-error" => RunState.CompletedWithErrors,
+            _ => RunState.Failed
+        };
+        Assert.Equal(expected, result.State, $"{toolId} 清理日志后 {scenario} 应保留准确结果");
+        if (scenario == "internal-error")
+            Assert.Equal("• 当次子任务", result.Message, $"{toolId} 清理日志后不能丢失已读取异常");
+        Assert.False(File.Exists(log), "监控不能阻止原工具删除日志");
+    }
+}
+
+static async Task RecreatedLogDoesNotJoinDeletedCarryAsync()
+{
+    foreach (var followRotatedFiles in new[] { false, true })
+    {
+        using var area = TestArea.Create();
+        var log = area.File("runtime.log");
+        var probe = area.File("z-probe.log");
+        await File.WriteAllTextAsync(log, "");
+        await File.WriteAllTextAsync(probe, "");
+        var monitor = new LogMonitor(TimeSpan.FromMilliseconds(10));
+        var source = new LogSource(area.Root, "*.log", FollowRotatedFiles: followRotatedFiles);
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var recreated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var received = new List<string>();
+        var task = monitor.MonitorCoreAsync(() => false, () => null, DateTimeOffset.Now,
+            source, monitor.Capture(source),
+            line => new LogObservation(RunCompleted: line == "current-completed"),
+            TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(3),
+            new DirectProgress<string>(line =>
+            {
+                received.Add(line);
+                if (line == "delete-ready") ready.TrySetResult();
+                if (line == "recreated") recreated.TrySetResult();
+            }), CancellationToken.None);
+        await File.AppendAllTextAsync(log, "旧半行");
+        await File.AppendAllTextAsync(probe, "delete-ready" + Environment.NewLine);
+        await ready.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        File.Delete(log);
+        await File.WriteAllTextAsync(log, "recreated" + Environment.NewLine + "current-completed" + Environment.NewLine);
+        await recreated.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var result = await task.WaitAsync(TimeSpan.FromSeconds(3));
+        Assert.Equal(RunState.Succeeded, result.State, "删除后重建应从新日志开头读取");
+        Assert.False(received.Any(line => line.StartsWith("旧半行", StringComparison.Ordinal)),
+            "旧文件未完成的尾行不能与新文件拼接");
+    }
+}
+
+static Task MissingLogDirectoryDoesNotBlockPreflightAsync()
+{
+    using var area = TestArea.Create();
+    var executable = area.File("offline-tool.exe");
+    File.WriteAllText(executable, "offline fixture");
+    var settings = new AppSettings
+    {
+        BetterGiPath = executable, MaaPath = executable, MaaEndPath = executable
+    };
+    foreach (var adapter in new ProcessAutomationAdapter[] { new BetterGiAdapter(), new MaaAdapter(), new MaaEndAdapter() })
+    {
+        var validation = adapter.Validate(settings);
+        Assert.False(validation.Issues.Any(issue => issue.Contains("日志目录", StringComparison.Ordinal)),
+            $"{adapter.Id} 安装目录中的日志尚未生成不应单独阻止启动");
+    }
+    var monitor = new LogMonitor();
+    Assert.Equal(0, monitor.Capture(new LogSource(area.File("debug"), "*.log")).Offsets.Count,
+        "尚未生成的日志目录应得到空检查点");
+    return Task.CompletedTask;
+}
+
 static async Task MaaExitSelfCompletionWaitsForProcessExitAsync()
 {
     var area = TestArea.Create();
@@ -7455,6 +7625,20 @@ static async Task MaaEndInvalidTaskMetadataFallsBackWithoutDetailsAsync()
     }
 }
 
+static async Task MaaEndNestedTaskLabelIsResolvedAsync()
+{
+    var result = await RunMaaEndFailedTaskWithMetadataAsync(
+        new Dictionary<string, string>
+        {
+            [Path.Combine("AutoEssence", "AutoEssence.json")] =
+                """{"task":[{"entry":"AutoEssenceSchedule","label":"$task.AutoEssence.label"}]}"""
+        },
+        """{"task.AutoEssence.label":"🎱基质刷取"}""",
+        "AutoEssenceSchedule");
+    Assert.Equal(RunState.CompletedWithErrors, result.State, "子目录任务失败应保留执行异常状态");
+    Assert.Equal("• 基质刷取", result.Message, "本轮基质失败应解析为原工具中文任务名");
+}
+
 static async Task MaaEndTaskFailureChangesAppCompletionResultAsync()
 {
     var result = await RunMaaEndAppCompletionScenarioAsync(
@@ -7789,7 +7973,8 @@ static string MaaEndTaskLine(int processId, string state, int taskId, string ent
 
 static async Task<RunResult> RunMaaEndFailedTaskWithMetadataAsync(
     IReadOnlyDictionary<string, string> taskFiles,
-    string? localeJson)
+    string? localeJson,
+    string entry = "GiftOperatorMain")
 {
     var area = TestArea.Create();
     try
@@ -7800,6 +7985,7 @@ static async Task<RunResult> RunMaaEndFailedTaskWithMetadataAsync(
             Directory.CreateDirectory(tasksDirectory);
             foreach (var taskFile in taskFiles)
             {
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(tasksDirectory, taskFile.Key))!);
                 await File.WriteAllTextAsync(
                     Path.Combine(tasksDirectory, taskFile.Key),
                     taskFile.Value);
@@ -7819,8 +8005,8 @@ static async Task<RunResult> RunMaaEndFailedTaskWithMetadataAsync(
             monitor => new MaaEndAdapter(monitor),
             new AppSettings { MaaEndPath = area.File("MaaEnd.exe") },
             0,
-            MaaEndTaskLine(219252, "Starting", 200000003, "GiftOperatorMain"),
-            MaaEndTaskLine(219252, "Failed", 200000003, "GiftOperatorMain"));
+            MaaEndTaskLine(219252, "Starting", 200000003, entry),
+            MaaEndTaskLine(219252, "Failed", 200000003, entry));
     }
     finally
     {

@@ -322,11 +322,13 @@ public sealed class LogMonitor
                 var inheritedCarry = string.Empty;
                 Utf8FileDecodeState? inheritedDecodeState = null;
                 LogCheckpoint.FileState? inheritedFileState = null;
+                var inheritedFromRotatedSource = false;
                 long offset;
                 if (source.FollowRotatedFiles
                     && !offsets.ContainsKey(file)
                     && TryGetRotatedSourcePath(file, out var rotatedSourcePath))
                 {
+                    inheritedFromRotatedSource = true;
                     offset = offsets.TryGetValue(rotatedSourcePath, out var sourceOffset) ? sourceOffset : 0;
                     if (carries.TryGetValue(rotatedSourcePath, out var sourceCarry))
                     {
@@ -342,7 +344,7 @@ public sealed class LogMonitor
                     }
 
                     // The active path now points to a new file. Preserve its zero offset even if it
-                    // appears after this scan, while the renamed file inherits the consumed prefix.
+                    // appears after this scan, while the backup inherits the consumed prefix.
                     offsets[rotatedSourcePath] = 0;
                     carries.Remove(rotatedSourcePath);
                     decodeStates.Remove(rotatedSourcePath);
@@ -361,7 +363,8 @@ public sealed class LogMonitor
                     }
                 }
 
-                if (stream.Length < offset || !IsContinuous(stream, offset, inheritedFileState))
+                if (stream.Length < offset || !IsContinuous(
+                        stream, offset, inheritedFileState, compareIdentity: !inheritedFromRotatedSource))
                 {
                     offset = 0;
                     inheritedCarry = string.Empty;
@@ -444,6 +447,10 @@ public sealed class LogMonitor
                     carries[file] = builder.ToString();
                 }
             }
+            catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                // Tool-side cleanup may remove a file after enumeration.
+            }
             catch (IOException)
             {
                 readFailed = true;
@@ -452,6 +459,21 @@ public sealed class LogMonitor
             {
                 readFailed = true;
             }
+        }
+
+        foreach (var file in carries.Keys.Where(file => !activeFiles.Contains(file)
+                     && (flushCarries || !source.FollowRotatedFiles)).ToArray())
+        {
+            var builder = new StringBuilder(carries[file]);
+            if (decodeStates.TryGetValue(file, out var decodeState))
+            {
+                decodeState.Decoder.Convert(
+                    Array.Empty<byte>(), 0, 0, characterBuffer, 0, characterBuffer.Length,
+                    flush: true, out _, out var charactersUsed, out _);
+                AppendDecodedCharacters(characterBuffer, charactersUsed, decodeState, builder, processLine);
+            }
+            EmitLine(builder, processLine, retainOverlap: false);
+            carries[file] = string.Empty;
         }
 
         if (!source.FollowRotatedFiles)
@@ -471,14 +493,17 @@ public sealed class LogMonitor
     private static bool IsContinuous(
         FileStream stream,
         long offset,
-        LogCheckpoint.FileState? previousState)
+        LogCheckpoint.FileState? previousState,
+        bool compareIdentity = true)
     {
         if (previousState is null)
         {
             return true;
         }
 
-        var identity = GetFileIdentity(stream.SafeFileHandle);
+        // MaaFramework copies its backup before truncating the active file. The copied
+        // prefix must still match, but its file identity is expected to be different.
+        var identity = compareIdentity ? GetFileIdentity(stream.SafeFileHandle) : null;
         return previousState.Offset == offset
             && (previousState.Identity is null || identity is null || previousState.Identity == identity)
             && previousState.ContinuityWindow.AsSpan().SequenceEqual(ReadContinuityWindow(stream, offset));
@@ -606,6 +631,11 @@ public sealed class LogMonitor
                 .ThenBy(path => source.FollowRotatedFiles && IsRotatedFile(path) ? 0 : 1)
                 .ThenBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // A tool may create its log directory on startup or remove it on exit.
+            return Array.Empty<string>();
         }
         catch (IOException)
         {
