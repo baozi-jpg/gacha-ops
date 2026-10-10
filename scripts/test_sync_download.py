@@ -78,7 +78,8 @@ class DownloadSyncTests(unittest.TestCase):
             sync.verify_file(self.package, release, check_zip=True)
 
     def run_mirror(self, *, corrupt_upload=False, new_release=False,
-                   corrupt_public=False, cache_control="no-store"):
+                   corrupt_public=False, cache_control="no-store",
+                   require_client_identity=False):
         calls = []
 
         def fake_command(*args):
@@ -95,8 +96,17 @@ class DownloadSyncTests(unittest.TestCase):
 
         response = io.BytesIO(b"bad" if corrupt_public else self.payload)
         response.headers = {"Cache-Control": cache_control}
+
+        def public_download(request, timeout):
+            if require_client_identity and not request.get_header("User-agent", "").startswith("GachaOps-Download-Sync/"):
+                error = sync.urllib.error.HTTPError(request.full_url, 403,
+                                                   "Unidentified client", {}, io.BytesIO())
+                self.addCleanup(error.close)
+                raise error
+            return response
+
         with patch.object(sync, "command", side_effect=fake_command), \
-                patch.object(sync.urllib.request, "urlopen", return_value=response), \
+                patch.object(sync.urllib.request, "urlopen", side_effect=public_download), \
                 contextlib.redirect_stdout(io.StringIO()):
             try:
                 sync.mirror("owner/repo", self.release, self.package, self.directory,
@@ -129,6 +139,9 @@ class DownloadSyncTests(unittest.TestCase):
         for options in ({"corrupt_public": True}, {"cache_control": "max-age=3600"}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.run_mirror(**options)
+
+    def test_public_download_identifies_sync_client(self):
+        self.run_mirror(require_client_identity=True)
 
 
 if __name__ == "__main__":

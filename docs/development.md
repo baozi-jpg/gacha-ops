@@ -83,7 +83,7 @@ python -B scripts/sync-download.py --verify-only
 python -B -m unittest discover -s scripts -p 'test_sync_download.py'
 ```
 
-离线测试使用独立临时目录和模拟的 GitHub、R2 响应，不访问真实桶。首次上线还须完成一次实际同步，并核对官网下载结果；离线测试不能代替此项验收。
+离线测试使用独立临时目录和模拟的 GitHub、R2 响应，不访问真实桶。公网验收请求使用 `GachaOps-Download-Sync` 客户端标识；Cloudflare 默认的浏览器完整性检查可能拒绝 Python 默认标识。首次上线还须完成一次实际同步，并核对官网下载结果；离线测试不能代替此项验收。
 
 ## 验证要求
 

@@ -101,7 +101,10 @@ def mirror(repo, release, package, directory, account, bucket, public_base):
         "--only-show-errors", "--no-progress")
     verify_file(promoted, release)
     url = f"{public_base.rstrip('/')}/{LATEST_KEY}"
-    request = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+    request = urllib.request.Request(url, headers={
+        "Cache-Control": "no-cache",
+        "User-Agent": "GachaOps-Download-Sync/1.0 (+https://gachaops.ma-kabaka.uk)",
+    })
     with urllib.request.urlopen(request, timeout=120) as response:
         if "no-store" not in response.headers.get("Cache-Control", "").lower():
             raise ValueError("Public download must return Cache-Control: no-store.")
