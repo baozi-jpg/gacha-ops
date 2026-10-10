@@ -55,6 +55,36 @@ git diff --check
 
 首次恢复运行包可能需要访问官方 NuGet 源。
 
+## 官网下载同步
+
+`.github/workflows/sync-download.yml` 在正式 Release 发布后将完整 Windows ZIP 同步到 Cloudflare R2，也可在 Actions 中手动运行以补同步当前最新正式版。先将 ZIP 上传到 Release 草稿，再发布；使用 `GITHUB_TOKEN` 自动创建 Release 时，应在发布工作流中直接调用同步步骤，该令牌触发的发布事件不会另行启动此工作流。
+
+在仓库的 Actions 配置中添加以下变量和密钥：
+
+| 类型 | 名称 | 内容 |
+| --- | --- | --- |
+| Variable | `R2_ACCOUNT_ID` | Cloudflare 账户 ID |
+| Variable | `R2_BUCKET` | 下载桶名称 |
+| Variable | `R2_PUBLIC_BASE_URL` | 下载域名的 HTTPS 地址，不含路径或末尾斜杠 |
+| Secret | `R2_ACCESS_KEY_ID` | 限定下载桶的 Access Key ID |
+| Secret | `R2_SECRET_ACCESS_KEY` | 对应的 Secret Access Key |
+
+R2 凭据仅授予该桶的对象读取和写入权限。下载域名绑定 R2；对 `/latest/GachaOps-win-x64.zip` 配置绕过缓存，不设置覆盖 `no-store` 的缓存规则。
+
+同步脚本调用 `gh`、AWS CLI 和 Python 标准库，使用 GitHub Ubuntu runner 已有工具。它核对发布附件的大小、SHA-256、ZIP 完整性及必要程序文件，上传版本包并回读核验；再次确认最新发布未变化后，才更新固定下载地址。最后从公网下载完整 ZIP，核对 SHA-256 和 `Cache-Control: no-store`。上传或版本包核验失败时不会更新最新包；更新后的公网验收失败会报告错误，保留版本包供检查，不自动删除或回滚。
+
+工作流串行运行，每次都解析当前最新正式版；手动补同步旧任务也不会主动选取旧版本。历史版本包保留在 `releases/<版本>/<包名>`，固定入口为 `latest/GachaOps-win-x64.zip`。同版本重跑会重新上传、校验，不要求更改附件名称。
+
+只读验证发布附件时，在已安装 `gh` 和 Python 的环境运行：
+
+```powershell
+$env:GITHUB_REPOSITORY = 'baozi-jpg/gacha-ops'
+python -B scripts/sync-download.py --verify-only
+python -B -m unittest discover -s scripts -p 'test_sync_download.py'
+```
+
+离线测试使用独立临时目录和模拟的 GitHub、R2 响应，不访问真实桶。首次上线还须完成一次实际同步，并核对官网下载结果；离线测试不能代替此项验收。
+
 ## 验证要求
 
 | 改动类型 | 检查 |
