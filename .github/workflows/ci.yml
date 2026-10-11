@@ -32,5 +32,11 @@ jobs:
       - name: Run offline tests
         run: dotnet run --project tests/GachaOps.Core.Tests/GachaOps.Core.Tests.csproj --configuration Release --no-build
 
+      - name: Check closing history persistence
+        run: dotnet run --file scripts/test-close-history.cs --configuration Release
+
+      - name: Check website download synchronization
+        run: python -B -m unittest discover -s scripts -p 'test_sync_download.py'
+
       - name: Check history details layout
         run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File ./scripts/test-history-layout.ps1
