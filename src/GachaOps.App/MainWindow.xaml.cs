@@ -89,6 +89,7 @@ public partial class MainWindow : Window
     private bool _startupRunCancelled;
     private CancellationTokenSource? _preparationCancellation;
     private Task<ToolPreparationResult>? _activePreparationTask;
+    private Task? _activeWorkflowTask;
     private bool _stopAfterCurrentRequested;
     private bool _logFlushScheduled;
     private int _pendingLogCharacters;
@@ -368,25 +369,32 @@ public partial class MainWindow : Window
             return;
         }
 
-        var activePreparation = _activePreparationTask;
+        var activeWorkflow = _activeWorkflowTask ?? _activePreparationTask;
         _isClosing = true;
         _durationTimer.Stop();
         _preparationCancellation?.Cancel();
         _appCancellation.Cancel();
-        if (activePreparation is not null)
-        {
-            try
-            {
-                await activePreparation;
-            }
-            catch (Exception)
-            {
-                // The Core transaction retains recovery evidence on unexpected preparation failures.
-            }
-        }
+        await WaitForClosingWorkflowAsync(activeWorkflow);
 
         _allowClose = true;
         Application.Current.Shutdown();
+    }
+
+    private async Task WaitForClosingWorkflowAsync(Task? activeWorkflow)
+    {
+        if (activeWorkflow is not null)
+        {
+            try
+            {
+                await activeWorkflow;
+            }
+            catch (Exception exception)
+            {
+                _crashLogStore.TryWrite("WorkflowShutdown", exception);
+            }
+        }
+
+        await WaitForHistoryWritesAsync();
     }
 
     private async void RunAllButton_Click(object sender, RoutedEventArgs e) =>
@@ -439,6 +447,10 @@ public partial class MainWindow : Window
             }
 
             return !_startupRunCancelled;
+        }
+        catch (OperationCanceledException) when (_appCancellation.IsCancellationRequested)
+        {
+            return false;
         }
         finally
         {
@@ -583,7 +595,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            await RunQueueAsync(
+            var workflowTask = RunQueueAsync(
                 _adapters.Values.ToArray(),
                 WorkflowTaskPlan.CreateEnabledSnapshot(snapshot),
                 settingsForRun,
@@ -591,9 +603,12 @@ public partial class MainWindow : Window
                 startedAutomatically: startedAutomatically,
                 minimizeBeforeQueueStart: !startedAutomatically,
                 scheduledRequest: scheduledRequest);
+            _activeWorkflowTask = workflowTask;
+            await workflowTask;
         }
         finally
         {
+            _activeWorkflowTask = null;
             _isWorkflowLifecycleLocked = false;
             UpdateWorkflowInteractionState();
         }
@@ -2029,7 +2044,9 @@ public partial class MainWindow : Window
     {
         try
         {
-            await _historyStore.AppendAsync(record, _appCancellation.Token);
+            // Stopping monitoring must not cancel the final cancellation/skipped records.
+            await _historyStore.AppendAsync(record);
+            if (_isClosing || Dispatcher.HasShutdownStarted) return true;
             await Dispatcher.InvokeAsync(() =>
             {
                 var insertionIndex = 0;

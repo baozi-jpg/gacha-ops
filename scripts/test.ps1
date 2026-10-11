@@ -15,6 +15,8 @@ Push-Location $projectRoot
 try {
     & $dotnetExe run --project '.\tests\GachaOps.Core.Tests\GachaOps.Core.Tests.csproj' --no-build
     if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE." }
+    & $dotnetExe run --file '.\scripts\test-close-history.cs'
+    if ($LASTEXITCODE -ne 0) { throw "Closing history tests failed with exit code $LASTEXITCODE." }
 }
 finally {
     Pop-Location
