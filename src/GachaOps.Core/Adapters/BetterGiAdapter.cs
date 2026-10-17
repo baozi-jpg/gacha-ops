@@ -7,6 +7,13 @@ namespace GachaOps.Core.Adapters;
 
 public sealed class BetterGiAdapter : ProcessAutomationAdapter
 {
+    // Preserve BetterGI's support for comments and trailing commas in every profile read.
+    private static readonly JsonDocumentOptions ProfileJsonOptions = new()
+    {
+        AllowTrailingCommas = true,
+        CommentHandling = JsonCommentHandling.Skip
+    };
+
     public BetterGiAdapter(LogMonitor? logMonitor = null)
         : base(logMonitor)
     {
@@ -150,12 +157,7 @@ public sealed class BetterGiAdapter : ProcessAutomationAdapter
         try
         {
             using var stream = File.OpenRead(path);
-            // Preserve BetterGI's support for comments and trailing commas; unknown fields remain its responsibility.
-            using var document = JsonDocument.Parse(stream, new JsonDocumentOptions
-            {
-                AllowTrailingCommas = true,
-                CommentHandling = JsonCommentHandling.Skip
-            });
+            using var document = JsonDocument.Parse(stream, ProfileJsonOptions);
             if (document.RootElement.ValueKind != JsonValueKind.Object)
                 issues.Add($"{label}文件结构无效：{name}");
         }
@@ -184,7 +186,7 @@ public sealed class BetterGiAdapter : ProcessAutomationAdapter
         var profilePath = Path.Combine(root, "User", "OneDragon", $"{settings.BetterGiProfile}.json");
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(profilePath));
+            using var document = JsonDocument.Parse(File.ReadAllText(profilePath), ProfileJsonOptions);
             if (document.RootElement.ValueKind != JsonValueKind.Object
                 || !document.RootElement.TryGetProperty("CompletionAction", out var completionAction)
                 || completionAction.ValueKind != JsonValueKind.String)
