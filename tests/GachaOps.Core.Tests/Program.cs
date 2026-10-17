@@ -6536,11 +6536,27 @@ static async Task VerifyBetterGiCompletionWithoutSelfExitAsync(string? configJso
 
 static async Task BetterGiConfiguredSelfExitWaitsForProcessExitAsync()
 {
-    await VerifyBetterGiConfiguredSelfExitAsync("关闭软件");
-    await VerifyBetterGiConfiguredSelfExitAsync("关闭游戏和软件");
+    foreach (var completionAction in new[] { "关闭软件", "关闭游戏和软件" })
+    {
+        foreach (var (json, format, withBom) in new[]
+        {
+            ($$"""{ "CompletionAction": "{{completionAction}}" }""", "标准 JSON", false),
+            ($$"""{ /* 完成动作 */ "CompletionAction": "{{completionAction}}" }""", "含注释", false),
+            ($$"""{ "CompletionAction": "{{completionAction}}", }""", "含尾逗号", false),
+            ($$"""{ /* 完成动作 */ "CompletionAction": "{{completionAction}}", }""", "含注释和尾逗号", false),
+            ($$"""{ /* 完成动作 */ "CompletionAction": "{{completionAction}}", }""", "含 BOM、注释和尾逗号", true)
+        })
+        {
+            foreach (var exitCode in new[] { 0, 7 })
+            {
+                await VerifyBetterGiConfiguredSelfExitAsync(
+                    json, $"{completionAction}、{format}、退出码 {exitCode}", withBom, exitCode);
+            }
+        }
+    }
 }
 
-static async Task VerifyBetterGiConfiguredSelfExitAsync(string completionAction)
+static async Task VerifyBetterGiConfiguredSelfExitAsync(string configJson, string scenario, bool withBom, int exitCode)
 {
     var area = TestArea.Create();
     var configDirectory = Path.Combine(area.Root, "User", "OneDragon");
@@ -6550,13 +6566,20 @@ static async Task VerifyBetterGiConfiguredSelfExitAsync(string completionAction)
     try
     {
         Directory.CreateDirectory(configDirectory);
-        await File.WriteAllTextAsync(configPath, $$"""
-            {
-              "CompletionAction": "{{completionAction}}"
-            }
-            """);
+        await File.WriteAllTextAsync(configPath, configJson, new UTF8Encoding(withBom));
+        var settings = new AppSettings
+        {
+            BetterGiPath = area.File("bettergi-self-exit-fixture.exe"),
+            BetterGiMode = "OneDragon",
+            BetterGiProfile = "日常"
+        };
+        await File.WriteAllTextAsync(settings.BetterGiPath, string.Empty);
         await File.WriteAllTextAsync(log, "旧运行日志" + Environment.NewLine);
         var monitor = new LogMonitor(TimeSpan.FromMilliseconds(10));
+        var adapter = new BetterGiAdapter(monitor);
+        var validation = adapter.Validate(settings);
+        Assert.True(validation.IsValid,
+            $"BetterGI {scenario}应通过启动校验：{string.Join("；", validation.Issues)}");
         var source = new LogSource(area.Root, "*.log");
         var completionObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var handle = new AutomationRunHandle(
@@ -6564,14 +6587,9 @@ static async Task VerifyBetterGiConfiguredSelfExitAsync(string completionAction)
             DateTimeOffset.Now,
             source,
             monitor.Capture(source));
-        var monitorTask = new BetterGiAdapter(monitor).MonitorAsync(
+        var monitorTask = adapter.MonitorAsync(
             handle,
-            new AppSettings
-            {
-                BetterGiPath = area.File("BetterGI.exe"),
-                BetterGiMode = "OneDragon",
-                BetterGiProfile = "日常"
-            },
+            settings,
             new DirectProgress<string>(line =>
             {
                 if (line.Contains("一条龙任务结束", StringComparison.Ordinal))
@@ -6586,10 +6604,17 @@ static async Task VerifyBetterGiConfiguredSelfExitAsync(string completionAction)
         await Task.Delay(50);
 
         Assert.False(monitorTask.IsCompleted,
-            $"BetterGI 配置{completionAction}时不能在进程退出前结束监控");
+            $"BetterGI {scenario}时不能在进程退出前结束监控");
 
-        await ExitControllableProcessAsync(process, 0);
+        await ExitControllableProcessAsync(process, exitCode);
         var result = await monitorTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(exitCode, result.ExitCode, $"BetterGI {scenario}应保留退出码");
+        if (exitCode != 0)
+        {
+            Assert.Equal(RunState.Failed, result.State, "BetterGI 完成标记不能覆盖稍后的非零退出");
+            return;
+        }
+
         Assert.Equal(RunState.Succeeded, result.State, "BetterGI 完成后正常退出应成功");
         Assert.Equal(0, result.ExitCode, "BetterGI 正常退出结果应保留退出码");
         Assert.Equal("任务已完成，且程序已正常退出。", result.Message,
