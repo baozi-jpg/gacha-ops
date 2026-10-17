@@ -35,6 +35,9 @@ jobs:
       - name: Check closing history persistence
         run: dotnet run --file scripts/test-close-history.cs --configuration Release
 
+      - name: Check scheduled desktop admission after preparation
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-scheduled-start.ps1
+
       - name: Check website download synchronization
         run: python -B -m unittest discover -s scripts -p 'test_sync_download.py'
 

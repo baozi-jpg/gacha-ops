@@ -657,6 +657,7 @@ public partial class MainWindow : Window
         var startNotified = 0;
         var tasksStarted = 0;
         var cancelledByUser = false;
+        var scheduledDesktopBlocked = false;
         Task startNotification = Task.CompletedTask;
         void NotifyActualStart(ToolStatusUpdate update)
         {
@@ -769,6 +770,37 @@ public partial class MainWindow : Window
 
             if (preparation.RunnableTasks.Count > 0)
             {
+                // Preparation and the countdown can outlive the original desktop admission check.
+                if (scheduledRequest is not null && ScheduledDesktopGuard.Check() is { } foregroundBlock)
+                {
+                    scheduledDesktopBlocked = true;
+                    summaryReason = $"定时 {scheduledRequest.Time} 已跳过：{foregroundBlock}";
+                    ScheduleStatusText.Text = summaryReason;
+                    var skippedAt = DateTimeOffset.Now;
+                    foreach (var task in preparation.RunnableTasks)
+                    {
+                        var record = new RunRecord
+                        {
+                            ToolId = task.ToolId,
+                            ToolName = ToolCatalog.Get(task.ToolId).DisplayName,
+                            StartedAt = startedAt,
+                            EndedAt = skippedAt,
+                            State = RunState.Skipped,
+                            Message = summaryReason,
+                            WorkflowRunId = workflowRunId,
+                            TaskExecutionId = Guid.NewGuid(),
+                            Channel = task.Channel
+                        };
+                        TrackHistoryWrite(record);
+                        ApplyStatus(new ToolStatusUpdate(task.ToolId, record.State, record.Message,
+                            WorkflowRunId: workflowRunId, TaskExecutionId: record.TaskExecutionId, Channel: task.Channel));
+                    }
+                    historyPersisted = await WaitForHistoryWritesAsync();
+                    SetFooter(summaryReason, Color.FromRgb(255, 159, 10));
+                    completionWarning = historyPersisted ? summaryReason : $"{summaryReason}{Environment.NewLine}历史保存失败";
+                    return;
+                }
+
                 SetBusy(true, canStopQueue: true);
                 SetFooter("任务队列正在运行", Color.FromRgb(0, 122, 255));
                 if (minimizeBeforeQueueStart)
@@ -829,7 +861,8 @@ public partial class MainWindow : Window
             await startNotification;
             _lastRunSummary = WorkflowRunSummary.Create(workflowRunId, startedAt, endedAt,
                 workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings,
-                tasksStarted: Volatile.Read(ref tasksStarted) != 0);
+                tasksStarted: Volatile.Read(ref tasksStarted) != 0,
+                skippedScheduledTime: scheduledDesktopBlocked ? scheduledRequest?.Time : null);
             LastRunDetailsButton.IsEnabled = true;
             if (!cancelledByUser && !_stopAfterCurrentRequested)
             {
@@ -880,7 +913,14 @@ public partial class MainWindow : Window
                 }
             }
             if (completionWarning is not null && !_isClosing && !_appCancellation.IsCancellationRequested)
-                ShowCompletionWithErrorsWarning(completionWarning);
+            {
+                if (scheduledDesktopBlocked)
+                {
+                    RestoreWindowForInteraction();
+                    AppDialog.ShowModal(this, "定时未运行", completionWarning, AppDialogKind.Warning);
+                }
+                else ShowCompletionWithErrorsWarning(completionWarning);
+            }
         }
 
         var shutdownCancellationRequested = _isClosing
