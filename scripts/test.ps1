@@ -17,6 +17,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE." }
     & $dotnetExe run --file '.\scripts\test-close-history.cs'
     if ($LASTEXITCODE -ne 0) { throw "Closing history tests failed with exit code $LASTEXITCODE." }
+    & (Join-Path $PSScriptRoot 'test-scheduled-start.ps1')
 }
 finally {
     Pop-Location

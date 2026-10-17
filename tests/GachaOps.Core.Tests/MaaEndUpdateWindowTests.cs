@@ -46,7 +46,10 @@ internal static class MaaEndUpdateWindowTests
         if (File.ReadAllText(Path.Combine(HelperRoot, FixtureFile)) != "hidden") ShowMain();
         _deadline = DateTime.UtcNow.AddSeconds(60);
         _ = SetTimer(_mainWindow, 1, 25, 0);
-        File.WriteAllText(Path.Combine(HelperRoot, "window-ready"), Environment.ProcessId.ToString());
+        // Publish readiness only after the writer has closed its handle.
+        var readyPath = Path.Combine(HelperRoot, "window-ready");
+        File.WriteAllText(readyPath + ".tmp", Environment.ProcessId.ToString());
+        File.Move(readyPath + ".tmp", readyPath);
         while (GetMessage(out var message, 0, 0, 0) > 0)
         {
             _ = TranslateMessage(ref message);
