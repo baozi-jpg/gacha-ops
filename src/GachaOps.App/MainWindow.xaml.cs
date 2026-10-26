@@ -24,6 +24,10 @@ public partial class MainWindow : Window
     private readonly AutomationQueueService _queue = new();
     private readonly NotificationService _notifications = new();
     private WorkflowRunSummary? _lastRunSummary;
+    private IReadOnlyList<WorkflowTaskSetting> _lastRerunTasks = [];
+    private AppSettings? _lastRunSettings;
+    private Guid? _lastRerunWorkflowRunId;
+    private Guid? _rerunParentWorkflowRunId;
     private readonly Dictionary<ToolId, IAutomationAdapter> _adapters;
     private readonly ToolUpdateCoordinator _toolUpdateCoordinator;
     private readonly WorkflowTaskCoordinator _workflow = new();
@@ -548,7 +552,9 @@ public partial class MainWindow : Window
     }
 
     private async Task RunEnabledWorkflowAsync(
-        bool startedAutomatically, ScheduledRequest? scheduledRequest = null)
+        bool startedAutomatically, ScheduledRequest? scheduledRequest = null,
+        IReadOnlyList<WorkflowTaskSetting>? temporaryTasks = null, AppSettings? rerunSettings = null,
+        Guid? parentWorkflowRunId = null)
     {
         if (IsWorkflowEditingLocked)
         {
@@ -576,7 +582,21 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var snapshot = WorkflowTaskPlan.CreateSnapshot(settingsForRun.WorkflowTasks!);
+            if (rerunSettings is not null)
+            {
+                // Keep current notification/timeout preferences, but run the original tool configurations.
+                // Read a separate object so these overrides never alter the saved settings.
+                settingsForRun = ReadNormalizedSettingsFromControls();
+                settingsForRun.BetterGiPath = rerunSettings.BetterGiPath;
+                settingsForRun.BetterGiMode = rerunSettings.BetterGiMode;
+                settingsForRun.BetterGiProfile = rerunSettings.BetterGiProfile;
+                settingsForRun.MaaPath = rerunSettings.MaaPath;
+                settingsForRun.MaaProfile = rerunSettings.MaaProfile;
+                settingsForRun.MaaEndPath = rerunSettings.MaaEndPath;
+                settingsForRun.MaaEndInstance = rerunSettings.MaaEndInstance;
+            }
+
+            var snapshot = WorkflowTaskPlan.CreateSnapshot(temporaryTasks ?? settingsForRun.WorkflowTasks!);
             if (!snapshot.Any(task => task.IsEnabled))
             {
                 if (scheduledRequest is not null)
@@ -602,7 +622,8 @@ public partial class MainWindow : Window
                 restoreWindowForErrors: startedAutomatically,
                 startedAutomatically: startedAutomatically,
                 minimizeBeforeQueueStart: !startedAutomatically,
-                scheduledRequest: scheduledRequest);
+                scheduledRequest: scheduledRequest,
+                parentWorkflowRunId: parentWorkflowRunId);
             _activeWorkflowTask = workflowTask;
             await workflowTask;
         }
@@ -621,7 +642,8 @@ public partial class MainWindow : Window
         bool restoreWindowForErrors = false,
         bool startedAutomatically = false,
         bool minimizeBeforeQueueStart = false,
-        ScheduledRequest? scheduledRequest = null)
+        ScheduledRequest? scheduledRequest = null,
+        Guid? parentWorkflowRunId = null, bool automaticRerun = false)
     {
         if (_queue.IsRunning || _isPreparing)
         {
@@ -640,6 +662,10 @@ public partial class MainWindow : Window
         }
 
         _lastRunSummary = null;
+        _lastRerunTasks = [];
+        _lastRunSettings = settingsForRun;
+        _lastRerunWorkflowRunId = null;
+        _rerunParentWorkflowRunId = parentWorkflowRunId;
         LastRunDetailsButton.IsEnabled = false;
         ResetLiveLog();
         _activityItems.Clear();
@@ -658,6 +684,7 @@ public partial class MainWindow : Window
         var tasksStarted = 0;
         var cancelledByUser = false;
         var scheduledDesktopBlocked = false;
+        var shouldRerunAutomatically = false;
         Task startNotification = Task.CompletedTask;
         void NotifyActualStart(ToolStatusUpdate update)
         {
@@ -771,11 +798,13 @@ public partial class MainWindow : Window
             if (preparation.RunnableTasks.Count > 0)
             {
                 // Preparation and the countdown can outlive the original desktop admission check.
-                if (scheduledRequest is not null && ScheduledDesktopGuard.Check() is { } foregroundBlock)
+                if ((scheduledRequest is not null || automaticRerun) && ScheduledDesktopGuard.Check() is { } foregroundBlock)
                 {
                     scheduledDesktopBlocked = true;
-                    summaryReason = $"定时 {scheduledRequest.Time} 已跳过：{foregroundBlock}";
-                    ScheduleStatusText.Text = summaryReason;
+                    summaryReason = scheduledRequest is not null
+                        ? $"定时 {scheduledRequest.Time} 已跳过：{foregroundBlock}"
+                        : $"自动补做已跳过：{foregroundBlock}";
+                    if (scheduledRequest is not null) ScheduleStatusText.Text = summaryReason;
                     var skippedAt = DateTimeOffset.Now;
                     foreach (var task in preparation.RunnableTasks)
                     {
@@ -859,11 +888,27 @@ public partial class MainWindow : Window
                 }
             }
             await startNotification;
+            var runRecords = GetActiveRunRecords();
+            _lastRerunTasks = WorkflowAutomationPolicy.CreateRerunTasks(workflowTasks, runRecords);
+            _lastRerunWorkflowRunId = workflowRunId;
+            shouldRerunAutomatically = WorkflowAutomationPolicy.ShouldRerunAutomatically(
+                settingsForRun, parentWorkflowRunId is not null, queueFinished, historyPersisted,
+                cancelledByUser || _stopAfterCurrentRequested || _isClosePending || _isClosing
+                    || _appCancellation.IsCancellationRequested,
+                runRecords, updateWarnings);
             _lastRunSummary = WorkflowRunSummary.Create(workflowRunId, startedAt, endedAt,
-                workflowTasks, GetActiveRunRecords(), queueResult, historyPersisted, summaryReason, updateWarnings,
+                workflowTasks, runRecords, queueResult, historyPersisted, summaryReason, updateWarnings,
                 tasksStarted: Volatile.Read(ref tasksStarted) != 0,
                 skippedScheduledTime: scheduledDesktopBlocked ? scheduledRequest?.Time : null);
             LastRunDetailsButton.IsEnabled = true;
+            if (parentWorkflowRunId is { } parentId)
+                _lastRunSummary = _lastRunSummary with
+                {
+                    Title = _lastRunSummary.Title.Replace("GachaOps", "GachaOps · 临时补做", StringComparison.Ordinal),
+                    Details = $"临时补做，原工作流 ID：{parentId}{Environment.NewLine}" + _lastRunSummary.Details
+                };
+            if (shouldRerunAutomatically)
+                _lastRunSummary = _lastRunSummary with { Body = _lastRunSummary.Body + Environment.NewLine + "将尝试自动补做一次" };
             if (!cancelledByUser && !_stopAfterCurrentRequested)
             {
                 var delivery = await SendNotificationAsync(settingsForRun, RunNotificationKind.Result,
@@ -917,10 +962,19 @@ public partial class MainWindow : Window
                 if (scheduledDesktopBlocked)
                 {
                     RestoreWindowForInteraction();
-                    AppDialog.ShowModal(this, "定时未运行", completionWarning, AppDialogKind.Warning);
+                    AppDialog.ShowModal(this, automaticRerun ? "自动补做未运行" : "定时未运行", completionWarning, AppDialogKind.Warning);
                 }
-                else ShowCompletionWithErrorsWarning(completionWarning);
+                else await ShowCompletionWithErrorsWarningAsync(completionWarning);
             }
+        }
+
+        if (shouldRerunAutomatically && !_isClosePending && !_isClosing && !_appCancellation.IsCancellationRequested)
+        {
+            var rerunTasks = _lastRerunTasks;
+            await RunQueueAsync(adapters, rerunTasks, settingsForRun,
+                restoreWindowForErrors: true, startedAutomatically: true,
+                parentWorkflowRunId: workflowRunId, automaticRerun: true);
+            return;
         }
 
         var shutdownCancellationRequested = _isClosing
@@ -947,11 +1001,11 @@ public partial class MainWindow : Window
             updateWarnings);
         if (completionWithErrorsMessage is not null)
         {
-            ShowCompletionWithErrorsWarning(completionWithErrorsMessage);
+            await ShowCompletionWithErrorsWarningAsync(completionWithErrorsMessage);
         }
     }
 
-    private void ShowCompletionWithErrorsWarning(string message)
+    private async Task ShowCompletionWithErrorsWarningAsync(string message)
     {
         if (_isClosing || _appCancellation.IsCancellationRequested || Dispatcher.HasShutdownStarted)
         {
@@ -959,7 +1013,19 @@ public partial class MainWindow : Window
         }
 
         RestoreWindowForInteraction();
-        AppDialog.ShowModal(this, "运行提醒", message, AppDialogKind.Warning);
+        var canRerun = !_isBusy && !_isPreparing && !_queue.IsRunning && !_isClosePending
+            && _scheduledSkipReports == 0 && _lastRerunTasks.Count > 0
+            && _lastRunSettings is not null && _lastRerunWorkflowRunId is not null;
+        if (AppDialog.ShowModal(this, "运行提醒", message, AppDialogKind.Warning,
+                confirmAction: canRerun ? "临时补做" : null) == true && canRerun)
+        {
+            // The queue has finished, but its caller still owns the lifecycle lock.
+            // Release it only for the explicitly requested rerun and restore it on return.
+            var lifecycleLocked = _isWorkflowLifecycleLocked;
+            _isWorkflowLifecycleLocked = false;
+            try { await RunManualRerunAsync(); }
+            finally { _isWorkflowLifecycleLocked = lifecycleLocked; }
+        }
     }
 
     private void StopAfterCurrentButton_Click(object sender, RoutedEventArgs e)
@@ -1130,6 +1196,7 @@ public partial class MainWindow : Window
                && string.Equals(left.MaaEndInstance, right.MaaEndInstance, StringComparison.Ordinal)
                && left.MinimizeOnStartup == right.MinimizeOnStartup
                && left.RunWorkflowOnStartup == right.RunWorkflowOnStartup
+               && left.AutoRerunFailedTasks == right.AutoRerunFailedTasks
                && left.ExitAfterWorkflowCompletes == right.ExitAfterWorkflowCompletes
                && left.UpdateToolsBeforeLaunch == right.UpdateToolsBeforeLaunch
                && left.NotificationsEnabled == right.NotificationsEnabled
@@ -1170,6 +1237,7 @@ public partial class MainWindow : Window
             MaaEndInstance = (MaaEndInstanceComboBox.SelectedItem as string ?? MaaEndInstanceComboBox.Text).Trim(),
             MinimizeOnStartup = MinimizeOnStartupCheckBox.IsChecked == true,
             RunWorkflowOnStartup = RunWorkflowOnStartupCheckBox.IsChecked == true,
+            AutoRerunFailedTasks = AutoRerunFailedTasksCheckBox.IsChecked == true,
             ExitAfterWorkflowCompletes = ExitAfterWorkflowCompletesCheckBox.IsChecked == true,
             UpdateToolsBeforeLaunch = UpdateToolsBeforeLaunchCheckBox.IsChecked == true,
             NotificationsEnabled = NotificationsEnabledCheckBox.IsChecked == true,
@@ -1317,6 +1385,7 @@ public partial class MainWindow : Window
         MaaEndInstanceComboBox.Text = _settings.MaaEndInstance;
         MinimizeOnStartupCheckBox.IsChecked = _settings.MinimizeOnStartup;
         RunWorkflowOnStartupCheckBox.IsChecked = _settings.RunWorkflowOnStartup;
+        AutoRerunFailedTasksCheckBox.IsChecked = _settings.AutoRerunFailedTasks;
         ExitAfterWorkflowCompletesCheckBox.IsChecked = _settings.ExitAfterWorkflowCompletes;
         UpdateToolsBeforeLaunchCheckBox.IsChecked = _settings.UpdateToolsBeforeLaunch;
         NotificationsEnabledCheckBox.IsChecked = _settings.NotificationsEnabled;
@@ -1860,6 +1929,9 @@ public partial class MainWindow : Window
 
     private async Task SummarizeUnstartedRunAsync(AppSettings settings, string reason)
     {
+        _lastRerunTasks = [];
+        _lastRunSettings = null;
+        _lastRerunWorkflowRunId = null;
         var now = DateTimeOffset.Now;
         _lastRunSummary = WorkflowRunSummary.Create(Guid.NewGuid(), now, now,
             WorkflowTaskPlan.CreateEnabledSnapshot(settings.WorkflowTasks ?? []), [],
@@ -2000,10 +2072,31 @@ public partial class MainWindow : Window
         await SaveSettingsFromControlsAsync();
     }
 
-    private void LastRunDetailsButton_Click(object sender, RoutedEventArgs e)
+    private async void LastRunDetailsButton_Click(object sender, RoutedEventArgs e) => await ShowLastRunDetailsAsync();
+
+    private async Task ShowLastRunDetailsAsync()
     {
         if (_lastRunSummary is { } summary)
-            AppDialog.ShowModal(this, summary.Title, summary.Details, AppDialogKind.Information);
+        {
+            var canRerun = !IsWorkflowEditingLocked && !_isClosePending && !_isClosing
+                && !_appCancellation.IsCancellationRequested && _scheduledSkipReports == 0
+                && _lastRerunTasks.Count > 0 && _lastRunSettings is not null
+                && _lastRerunWorkflowRunId == summary.WorkflowRunId;
+            if (AppDialog.ShowModal(this, summary.Title, summary.Details, AppDialogKind.Information,
+                    confirmAction: canRerun ? "临时补做" : null) == true && canRerun
+                && _lastRerunWorkflowRunId == summary.WorkflowRunId)
+                await RunManualRerunAsync();
+        }
+    }
+
+    private async Task RunManualRerunAsync()
+    {
+        if (IsWorkflowEditingLocked || _lastRunSettings is null || _lastRerunWorkflowRunId is not { } parentId) return;
+        var settings = _lastRunSettings;
+        var selected = AppDialog.SelectRerunTasks(this, _lastRerunTasks);
+        if (selected.Count == 0) return;
+        await RunEnabledWorkflowAsync(false, temporaryTasks: selected, rerunSettings: settings,
+            parentWorkflowRunId: parentId);
     }
 
     private void HistoryRunDetailsButton_Click(object sender, RoutedEventArgs e)
@@ -2015,7 +2108,10 @@ public partial class MainWindow : Window
         var details = string.Join(Environment.NewLine + Environment.NewLine, records.Select(record =>
             $"{record.ToolName} · {RunStatePresentation.StateName(record.State)} · {RunStatePresentation.FormatDuration(record.Duration)}{Environment.NewLine}"
             + $"工作流 ID：{record.WorkflowRunId}{Environment.NewLine}记录 ID：{record.Id}{Environment.NewLine}"
-            + record.Message + Environment.NewLine + string.Join(Environment.NewLine, record.LogExcerpt)));
+            + (record.ParentWorkflowRunId is { } parent ? $"补做来源：{parent}{Environment.NewLine}" : string.Empty)
+            + record.Message + Environment.NewLine
+            + (record.ExitDetails is { } exitDetails ? exitDetails + Environment.NewLine : string.Empty)
+            + string.Join(Environment.NewLine, record.LogExcerpt)));
         AppDialog.ShowModal(this, "本轮历史详情", details, AppDialogKind.Information);
     }
 
@@ -2047,6 +2143,8 @@ public partial class MainWindow : Window
 
     private void TrackHistoryWrite(RunRecord record)
     {
+        if (_rerunParentWorkflowRunId is { } parent)
+            record = record with { ParentWorkflowRunId = parent };
         var writeTask = PersistRecordAsync(record);
         lock (_historyWritesLock)
         {
@@ -2349,6 +2447,7 @@ public partial class MainWindow : Window
         }
 
         RunAllButton.IsEnabled = !locked;
+
         _workflow.SetBusy(locked);
         UpdateSettingsControlsEnabled();
     }

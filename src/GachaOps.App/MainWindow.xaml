@@ -384,6 +384,7 @@
                                 Click="HistoryRunDetailsButton_Click" Style="{StaticResource SecondaryButton}" />
                         <Button x:Name="LastRunDetailsButton" DockPanel.Dock="Right" Content="本轮详情" Margin="0,0,8,0"
                                 IsEnabled="False" Click="LastRunDetailsButton_Click" Style="{StaticResource SecondaryButton}" />
+
                         <StackPanel>
                             <TextBlock Text="运行历史" FontSize="22" FontWeight="SemiBold" />
                         </StackPanel>
@@ -841,6 +842,7 @@
                                     <RowDefinition Height="44" />
                                     <RowDefinition Height="44" />
                                     <RowDefinition Height="44" />
+                                    <RowDefinition Height="44" />
                                 </Grid.RowDefinitions>
                                 <TextBlock Grid.Row="0" Text="启动最小化" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
                                 <CheckBox x:Name="MinimizeOnStartupCheckBox" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
@@ -857,6 +859,12 @@
                                 <CheckBox x:Name="UpdateToolsBeforeLaunchCheckBox" Grid.Row="3" Grid.Column="1" HorizontalAlignment="Left" VerticalAlignment="Center"
                                           Style="{StaticResource ToggleSwitchCheckBoxStyle}" AutomationProperties.Name="启动前自动更新工具" Click="SettingsToggle_Click" />
                                 <TextBlock Grid.Row="3" Grid.Column="2" Text="启动前自动更新" Margin="16,0,0,0" VerticalAlignment="Center" />
+                                <TextBlock Grid.Row="4" Text="自动补做" VerticalAlignment="Center" Foreground="{StaticResource MutedTextBrush}" />
+                                <CheckBox x:Name="AutoRerunFailedTasksCheckBox" Grid.Row="4" Grid.Column="1"
+                                          ToolTip="整轮结束后重新运行未成功的工具，已完成的游戏内步骤也可能再次执行。最多自动补做一次。"
+                                          Style="{StaticResource ToggleSwitchCheckBoxStyle}" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                          AutomationProperties.Name="失败后自动临时补做一次" Click="SettingsToggle_Click" />
+                                <TextBlock Grid.Row="4" Grid.Column="2" Text="失败后自动补做一次" Margin="16,0,0,0" VerticalAlignment="Center" />
                             </Grid>
                         </Expander>
 

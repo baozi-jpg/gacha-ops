@@ -59,7 +59,7 @@ public sealed class HistoryStore
                 return;
             }
 
-            var persistedRecord = WithoutLogExcerpt(record);
+            var persistedRecord = WithBoundedLogExcerpt(record);
             if (rewriteRequired)
             {
                 var snapshot = new List<RunRecord>(retainedRecords.Count + 1);
@@ -165,8 +165,10 @@ public sealed class HistoryStore
                     }
                     else
                     {
-                        rewriteRequired |= record.LogExcerpt is not { Count: 0 };
-                        retainedRecords.Add(WithoutLogExcerpt(record));
+                        var normalized = WithBoundedLogExcerpt(record);
+                        rewriteRequired |= record.LogExcerpt is null
+                            || !record.LogExcerpt.SequenceEqual(normalized.LogExcerpt);
+                        retainedRecords.Add(normalized);
                     }
                 }
                 else
@@ -209,7 +211,7 @@ public sealed class HistoryStore
                 foreach (var record in records)
                 {
                     await writer.WriteLineAsync(
-                        JsonSerializer.Serialize(WithoutLogExcerpt(record), _options).AsMemory(),
+                        JsonSerializer.Serialize(WithBoundedLogExcerpt(record), _options).AsMemory(),
                         cancellationToken).ConfigureAwait(false);
                 }
 
@@ -227,10 +229,15 @@ public sealed class HistoryStore
         }
     }
 
-    private static RunRecord WithoutLogExcerpt(RunRecord record)
+    private static RunRecord WithBoundedLogExcerpt(RunRecord record)
     {
-        return record.LogExcerpt is { Count: 0 }
-            ? record
-            : record with { LogExcerpt = Array.Empty<string>() };
+        // Keep the monitor's existing evidence selection, bounded again for legacy/imported records.
+        var excerpt = record.State is RunState.Failed or RunState.TimedOut or RunState.CompletedWithErrors
+            ? (record.LogExcerpt ?? []).Where(line => !string.IsNullOrWhiteSpace(line)).TakeLast(20)
+                .Select(line => line.Replace('\r', ' ').Replace('\n', ' '))
+                .Select(line => line.Length <= 600 ? line : string.Concat(line.AsSpan(0, 597), "..."))
+                .ToArray()
+            : Array.Empty<string>();
+        return record with { LogExcerpt = excerpt };
     }
 }

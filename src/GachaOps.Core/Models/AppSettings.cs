@@ -29,6 +29,8 @@ public sealed class AppSettings
 
     public bool ExitAfterWorkflowCompletes { get; set; }
 
+    public bool AutoRerunFailedTasks { get; set; }
+
     public bool UpdateToolsBeforeLaunch { get; set; }
 
     public bool NotificationsEnabled { get; set; }

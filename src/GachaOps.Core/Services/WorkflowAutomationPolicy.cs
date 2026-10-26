@@ -4,6 +4,23 @@ namespace GachaOps.Core.Services;
 
 public static class WorkflowAutomationPolicy
 {
+    public static IReadOnlyList<WorkflowTaskSetting> CreateRerunTasks(
+        IEnumerable<WorkflowTaskSetting> plannedTasks, IEnumerable<RunRecord> records)
+    {
+        var outcomes = records.ToArray();
+        return WorkflowTaskPlan.CreateEnabledSnapshot(plannedTasks)
+            .Where(task => !outcomes.Any(record => record.ToolId == task.ToolId && record.State == RunState.Succeeded))
+            .ToArray();
+    }
+
+    public static bool ShouldRerunAutomatically(AppSettings settings, bool isTemporaryRun,
+        bool queueFinished, bool historyPersisted, bool interrupted,
+        IEnumerable<RunRecord> records, IReadOnlyList<ToolPreparationWarning> warnings) =>
+        settings.AutoRerunFailedTasks && !isTemporaryRun && queueFinished && historyPersisted
+        && !interrupted && warnings.Count == 0
+        && !records.Any(record => record.State == RunState.Cancelled)
+        && records.Any(record => record.State is RunState.Failed or RunState.TimedOut or RunState.CompletedWithErrors);
+
     private const string CompletionWithErrorsHistoryFailureMessage =
         "历史保存失败";
 
