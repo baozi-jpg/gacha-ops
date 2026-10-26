@@ -201,6 +201,8 @@ var tests = new (string Name, Func<Task> Run)[]
     ("工具更新状态文件不存在时返回空状态", MissingToolUpdateStateReturnsEmptyAsync),
     ("损坏工具更新状态保持独立解析错误", CorruptToolUpdateStateReportsInvalidDataAsync),
     ("工具更新状态访问错误会阻断准备", ToolUpdateStateAccessErrorBlocksPreparationAsync),
+    ("临时补做保留任务计划并重新预检", TemporaryRerunAsync),
+    ("自动补做只允许一次且尊重中止", AutomaticRerunPolicyAsync),
     ("自动退出只在满足条件时触发", WorkflowAutomationPolicyMatchesExitLifecycleAsync),
     ("执行异常完整结束的退出与提醒策略正确", WorkflowAutomationPolicyMatchesCompletionErrorNotificationAsync),
     ("旧 QueueOrder 迁移为通道 1 工作流", LegacyQueueOrderMigratesAsync),
@@ -232,8 +234,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("崩溃损坏尾行不阻止后续写入", CorruptCrashLogTailDoesNotBlockWriteAsync),
     ("崩溃记录路径不可写时安全失败", CrashLogWriteFailsSafelyForUnwritablePathAsync),
     ("崩溃并发写入保持每行 JSON 完整", ConcurrentCrashLogWritesRemainValidAsync),
-    ("历史追加不保存原始日志且不改变内存记录", HistoryAppendOmitsRawLogExcerptWithoutMutatingInputAsync),
-    ("旧历史原始日志在首次读取时清除", LegacyHistoryRawLogIsRemovedOnFirstReadAsync),
+    ("成功历史不保存原始日志且不改变内存记录", HistoryAppendOmitsRawLogExcerptWithoutMutatingInputAsync),
+    ("旧失败历史保留有界日志摘录", LegacyFailureHistoryRetainsExcerptAsync),
+    ("异常历史摘录跨重启保留且限制大小", FailureHistoryRetainsBoundedExcerptAsync),
+    ("退出码详情解释访问冲突且不推测根因", ExitDetailsDescribeAccessViolationAsync),
     ("历史读取过滤过期记录并压缩文件", HistoryReadFiltersExpiredRecordsAndCompactsFileAsync),
     ("历史追加清理过期记录并完整保留新旧有效记录", HistoryAppendCleansExpiredRecordsAndPreservesValidRecordsAsync),
     ("历史保留恰好七天并过滤更早一瞬间的记录", HistoryRetentionKeepsExactSevenDayBoundaryAsync),
@@ -1364,6 +1368,7 @@ static async Task StartupAutomationSettingsRoundTripAsync()
             MinimizeOnStartup = true,
             RunWorkflowOnStartup = true,
             ExitAfterWorkflowCompletes = true,
+            AutoRerunFailedTasks = true,
             UpdateToolsBeforeLaunch = true
         });
 
@@ -1371,6 +1376,7 @@ static async Task StartupAutomationSettingsRoundTripAsync()
         Assert.True(restored.MinimizeOnStartup, "启动后最小化未持久化");
         Assert.True(restored.RunWorkflowOnStartup, "启动后自动运行未持久化");
         Assert.True(restored.ExitAfterWorkflowCompletes, "任务结束后退出未持久化");
+        Assert.True(restored.AutoRerunFailedTasks, "自动补做开关未持久化");
         Assert.True(restored.UpdateToolsBeforeLaunch, "显式开启的启动前自动更新开关未持久化");
     }
     finally
@@ -4576,6 +4582,76 @@ static FakeToolUpdateProvider CreateBlockingUpdateProvider(ToolId toolId, Task r
         }
     };
 
+static async Task TemporaryRerunAsync()
+{
+    using var area = TestArea.Create();
+    var settings = new AppSettings { WorkflowTasks =
+    [
+        new() { ToolId = ToolId.BetterGi },
+        new() { ToolId = ToolId.MaaEnd },
+        new() { ToolId = ToolId.Maa, Channel = 2 }
+    ] };
+    var plan = settings.WorkflowTasks.ToArray();
+    var first = new FakeAdapter(ToolId.BetterGi, RunState.Failed, RunState.Succeeded);
+    var next = new FakeAdapter(ToolId.MaaEnd, RunState.Succeeded);
+    var parallel = new FakeAdapter(ToolId.Maa, RunState.Succeeded);
+    IAutomationAdapter[] adapters = [first, next, parallel];
+    var queue = new AutomationQueueService();
+    var records = new ConcurrentQueue<RunRecord>();
+    queue.RunRecorded += records.Enqueue;
+    await queue.RunAsync(adapters, plan, settings);
+    var original = records.ToArray();
+    var retry = WorkflowAutomationPolicy.CreateRerunTasks(plan, original);
+    Assert.True(retry.Select(task => task.ToolId).SequenceEqual(new[] { ToolId.BetterGi, ToolId.MaaEnd }),
+        "只补做失败和被跳过的任务，并保留原顺序");
+    Assert.True(settings.WorkflowTasks.SequenceEqual(plan), "不能改动每日任务计划");
+    var coordinator = new ToolUpdateCoordinator([], new ToolUpdateStateStore(area.Root));
+    first.ProcessRunning = true;
+    var blocked = await coordinator.PrepareAsync(adapters, retry, settings);
+    Assert.False(blocked.Succeeded, "原进程仍在运行时必须阻止补做");
+    Assert.Equal(1, first.StartCount, "预检不能启动工具");
+    first.ProcessRunning = false;
+    var ready = await coordinator.PrepareAsync(adapters, retry, settings);
+    Assert.True(ready.Succeeded, "进程退出后应允许补做");
+    records.Clear();
+    await queue.RunAsync(adapters, ready.RunnableTasks, settings, preparedWorkflowRunId: ready.WorkflowRunId);
+    Assert.Equal(2, first.StartCount, "失败项应重新运行");
+    Assert.Equal(1, next.StartCount, "跳过项应补做");
+    Assert.Equal(1, parallel.StartCount, "已成功的另一通道不能重跑");
+    Assert.True(original.Any(record => record.State == RunState.Failed), "不能覆盖原失败记录");
+    Assert.True(records.All(record => record.WorkflowRunId != original[0].WorkflowRunId), "补做必须使用独立轮次");
+}
+
+static Task AutomaticRerunPolicyAsync()
+{
+    var settings = new AppSettings();
+    var now = DateTimeOffset.Now;
+    RunRecord[] records = [new() { ToolId = ToolId.Maa, ToolName = "MAA", State = RunState.Failed,
+        StartedAt = now, EndedAt = now, Message = "失败" }];
+    bool Allowed(bool temporary = false, bool finished = true, bool persisted = true, bool interrupted = false) =>
+        WorkflowAutomationPolicy.ShouldRerunAutomatically(settings, temporary, finished, persisted, interrupted, records, []);
+    Assert.False(Allowed(), "自动补做必须默认关闭");
+    settings.AutoRerunFailedTasks = true;
+    Assert.True(Allowed(), "开启后应允许失败轮次自动补做");
+    Assert.False(Allowed(temporary: true), "补做轮次不能再次自动补做");
+    Assert.False(Allowed(finished: false), "启动准备失败不应循环尝试");
+    Assert.False(Allowed(persisted: false), "历史未保存不能自动补做");
+    Assert.False(Allowed(interrupted: true), "停止或关闭后不能自动补做");
+    foreach (var state in new[] { RunState.Succeeded, RunState.Skipped, RunState.Cancelled })
+    {
+        records = [records[0] with { State = state }];
+        Assert.False(Allowed(), "单独成功、跳过或取消不能触发自动补做");
+    }
+    foreach (var state in new[] { RunState.TimedOut, RunState.CompletedWithErrors })
+    {
+        records = [records[0] with { State = state }];
+        Assert.True(Allowed(), "超时与执行异常可触发一次补做");
+    }
+    records = [records[0] with { State = RunState.Failed }, records[0] with { State = RunState.Cancelled }];
+    Assert.False(Allowed(), "混合失败与取消也不能触发自动补做");
+    return Task.CompletedTask;
+}
+
 static Task WorkflowAutomationPolicyMatchesExitLifecycleAsync()
 {
     var settings = new AppSettings
@@ -5519,7 +5595,7 @@ static async Task HistoryAppendOmitsRawLogExcerptWithoutMutatingInputAsync()
         ToolName = "MaaEnd",
         StartedAt = now.AddMinutes(-2),
         EndedAt = now,
-        State = RunState.CompletedWithErrors,
+        State = RunState.Succeeded,
         Message = "整理后的执行异常",
         ExitCode = 23,
         LogExcerpt = new[] { sensitiveMarker },
@@ -5550,7 +5626,7 @@ static async Task HistoryAppendOmitsRawLogExcerptWithoutMutatingInputAsync()
     Assert.Equal(expected.Channel, actual.Channel, "历史通道未保留");
 }
 
-static async Task LegacyHistoryRawLogIsRemovedOnFirstReadAsync()
+static async Task LegacyFailureHistoryRetainsExcerptAsync()
 {
     using var area = TestArea.Create();
     var now = new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.FromHours(8));
@@ -5579,7 +5655,7 @@ static async Task LegacyHistoryRawLogIsRemovedOnFirstReadAsync()
 
     var latest = (await history.ReadLatestAsync(1)).Single();
 
-    Assert.Equal(0, latest.LogExcerpt.Count, "ReadLatestAsync 返回的旧历史日志摘录应为空");
+    Assert.SequenceEqual(expected.LogExcerpt, latest.LogExcerpt, "旧失败历史的有界摘录应保留");
     Assert.Equal(expected.Id, latest.Id, "旧历史记录 ID 未保留");
     Assert.Equal(expected.ToolId, latest.ToolId, "旧历史工具未保留");
     Assert.Equal(expected.ToolName, latest.ToolName, "旧历史工具名称未保留");
@@ -5592,10 +5668,62 @@ static async Task LegacyHistoryRawLogIsRemovedOnFirstReadAsync()
     Assert.Equal(expected.TaskExecutionId, latest.TaskExecutionId, "旧历史任务 ID 未保留");
     Assert.Equal(expected.Channel, latest.Channel, "旧历史通道未保留");
     var compactedText = await File.ReadAllTextAsync(history.HistoryPath);
-    Assert.False(compactedText.Contains(sensitiveMarker, StringComparison.Ordinal),
-        "首次读取应从历史文件中移除旧原始日志标记");
+    Assert.True(compactedText.Contains(sensitiveMarker, StringComparison.Ordinal),
+        "读取不应清除失败诊断摘录");
     var all = (await history.ReadAllAsync()).Single();
-    Assert.Equal(0, all.LogExcerpt.Count, "ReadAllAsync 返回的历史日志摘录应为空");
+    Assert.SequenceEqual(expected.LogExcerpt, all.LogExcerpt, "重复读取仍保留诊断摘录");
+}
+
+static async Task FailureHistoryRetainsBoundedExcerptAsync()
+{
+    using var area = TestArea.Create();
+    var now = DateTimeOffset.UtcNow;
+    var history = new HistoryStore(area.Root, new FixedTimeProvider(now));
+    foreach (var state in new[] { RunState.Failed, RunState.TimedOut, RunState.CompletedWithErrors,
+        RunState.Succeeded, RunState.Cancelled, RunState.Skipped })
+    {
+        var lines = Enumerable.Range(0, 30).Select(index => $"line-{index}:\r\n" + new string('x', 700)).ToArray();
+        var record = new RunRecord { ToolId = ToolId.BetterGi, ToolName = "BetterGI", State = state,
+            StartedAt = now.AddMinutes(-1), EndedAt = now, Message = "test", LogExcerpt = lines };
+        await history.AppendAsync(record);
+        var reopened = new HistoryStore(area.Root, new FixedTimeProvider(now));
+        var actual = (await reopened.ReadAllAsync()).Single(item => item.Id == record.Id);
+        var expectedCount = state is RunState.Failed or RunState.TimedOut or RunState.CompletedWithErrors ? 20 : 0;
+        Assert.Equal(expectedCount, actual.LogExcerpt.Count, "仅异常记录保存有界摘录");
+        Assert.True(actual.LogExcerpt.All(line => line.Length <= 600 && !line.Contains('\n') && !line.Contains('\r')),
+            "摘录行数和单行长度都必须受限");
+        if (expectedCount > 0)
+        {
+            Assert.True(actual.LogExcerpt[0].StartsWith("line-10:", StringComparison.Ordinal), "保留末尾摘录");
+            Assert.True(actual.LogExcerpt[^1].StartsWith("line-29:", StringComparison.Ordinal), "保留最新证据");
+        }
+        Assert.Equal(30, record.LogExcerpt.Count, "不更改内存证据");
+        Assert.True(record.LogExcerpt[0].Length > 600, "不截断调用者原始内容");
+    }
+    var before = await File.ReadAllTextAsync(history.HistoryPath);
+    await history.ReadLatestAsync(3);
+    Assert.Equal(before, await File.ReadAllTextAsync(history.HistoryPath), "规范化后重复读取保持文件内容");
+}
+
+static Task ExitDetailsDescribeAccessViolationAsync()
+{
+    var id = Guid.NewGuid();
+    var now = DateTimeOffset.UtcNow;
+    var record = new RunRecord { ToolId = ToolId.BetterGi, ToolName = "BetterGI", State = RunState.Failed,
+        StartedAt = now, EndedAt = now, Message = "程序异常退出", WorkflowRunId = id,
+        ExitCode = unchecked((int)0xC0000005) };
+    Assert.True(record.ExitDetails!.Contains("-1073741819（0xC0000005）", StringComparison.Ordinal), "保留原始退出码");
+    Assert.True(record.ExitDetails.Contains("访问冲突", StringComparison.Ordinal), "解释已知异常码");
+    Assert.True(record.ExitDetails.Contains("不能单独确定", StringComparison.Ordinal), "不能凭退出码归因");
+    Assert.True((record with { ExitCode = 7 }).ExitDetails == "退出码：7（0x00000007）", "普通退出码不套用崩溃解释");
+    Assert.True((record with { ExitCode = 0 }).ExitDetails is null, "正常退出无故障说明");
+    Assert.True((record with { ExitCode = null }).ExitDetails is null, "未知退出码不虚构说明");
+    var summary = WorkflowRunSummary.Create(id, now, now, [new() { ToolId = ToolId.BetterGi }], [record],
+        QueueRunResult.NotAllPlannedTasksCompleted, true);
+    Assert.True(summary.Details.Contains(record.ExitDetails, StringComparison.Ordinal), "本轮详情展示退出码说明");
+    Assert.False(summary.Body.Contains("0xC0000005", StringComparison.Ordinal), "技术解释不加入通知摘要");
+    Assert.False(JsonSerializer.Serialize(record).Contains("ExitDetails", StringComparison.Ordinal), "派生说明不持久化");
+    return Task.CompletedTask;
 }
 
 static async Task HistoryAppendCleansExpiredRecordsAndPreservesValidRecordsAsync()
@@ -5662,7 +5790,7 @@ static async Task HistoryAppendCleansExpiredRecordsAndPreservesValidRecordsAsync
     Assert.Equal(appended.State, actualAppended.State, "新记录状态未保存");
     Assert.Equal(appended.Message, actualAppended.Message, "新记录消息未保存");
     Assert.Equal(appended.ExitCode, actualAppended.ExitCode, "新记录退出码未保存");
-    Assert.Equal(0, actualAppended.LogExcerpt.Count, "新记录日志摘录不应保存");
+    Assert.SequenceEqual(appended.LogExcerpt, actualAppended.LogExcerpt, "压缩历史时保留新增异常摘录");
     Assert.Equal(appended.WorkflowRunId, actualAppended.WorkflowRunId, "新记录工作流 ID 未保存");
     Assert.Equal(appended.TaskExecutionId, actualAppended.TaskExecutionId, "新记录任务 ID 未保存");
     Assert.Equal(appended.Channel, actualAppended.Channel, "新记录通道未保存");

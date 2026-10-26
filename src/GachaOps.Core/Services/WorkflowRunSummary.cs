@@ -71,6 +71,7 @@ public sealed record WorkflowRunSummary(Guid WorkflowRunId, string Title, string
         {
             details.AppendLine().AppendLine($"{record.ToolName} · 通道 {record.Channel} · {State(record.State)}");
             details.AppendLine($"记录 ID：{record.Id}").AppendLine(record.Message);
+            if (record.ExitDetails is { } exitDetails) details.AppendLine(exitDetails);
             details.AppendLine($"耗时：{Duration(record.Duration)}");
             if (record.LogExcerpt.Count > 0)
                 details.AppendLine("日志摘录：").AppendLine(string.Join(Environment.NewLine, record.LogExcerpt));

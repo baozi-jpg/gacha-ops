@@ -19,15 +19,20 @@ function Get-SourceSection([string]$start, [string]$end) {
     if ($last -lt 0) { throw "Missing source boundary: $end" }
     return $source.Substring($first, $last - $first)
 }
-$methods = (Get-SourceSection '    private async Task RunQueueAsync(' '    private void ShowCompletionWithErrorsWarning(') +
+$methods = (Get-SourceSection '    private async Task RunQueueAsync(' '    private void StopAfterCurrentButton_Click(') +
     (Get-SourceSection '    private void TrackHistoryWrite(' '    private async Task<bool> PersistRecordAsync(') +
-    (Get-SourceSection '    private async Task<NotificationDeliveryResult> SendNotificationAsync(' '    private async Task SummarizeUnstartedRunAsync(')
+    (Get-SourceSection '    private async Task<NotificationDeliveryResult> SendNotificationAsync(' '    private async Task SummarizeUnstartedRunAsync(') +
+    (Get-SourceSection '    private async Task ShowLastRunDetailsAsync(' '    private void HistoryRunDetailsButton_Click(')
+$rerunFields = Get-SourceSection '    private WorkflowRunSummary? _lastRunSummary;' '    private readonly Dictionary<ToolId, IAutomationAdapter> _adapters;'
+$source = [IO.File]::ReadAllText((Join-Path $projectRoot 'src\GachaOps.App\MainWindow.Scheduling.cs'))
+$methods += Get-SourceSection '    private async Task ReportScheduledSkipAsync(' "`r`n}"
 $fixture = @'
 using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Windows.Media;
 using GachaOps.Core.Abstractions;
 using GachaOps.Core.Models;
 using GachaOps.Core.Services;
@@ -43,6 +48,14 @@ await MainWindow.CheckAsync("ordinary startup unchanged", false, true, null, "�
 await MainWindow.CheckAsync("skip survives notification failure", true, true, null, "桌面已锁定或会话状态无法确认", deliveryFails: true);
 await MainWindow.CheckAsync("skip survives history failure", true, true, null, "其他应用处于前台或前台状态无法确认", historyFails: true);
 await MainWindow.CheckAsync("countdown cancellation takes precedence", true, true, null, "桌面已锁定或会话状态无法确认", cancelCountdown: true);
+await MainWindow.CheckRerunAsync("automatic rerun succeeds", RunState.Succeeded);
+await MainWindow.CheckRerunAsync("automatic rerun fails once", RunState.Failed);
+await MainWindow.CheckRerunAsync("automatic rerun blocked by running process", RunState.Succeeded, running: true);
+await MainWindow.CheckRerunAsync("automatic rerun cancelled", RunState.Succeeded, cancelled: true);
+await MainWindow.CheckRerunAsync("stop prevents automatic rerun", RunState.Succeeded, stopped: true);
+await MainWindow.CheckRerunAsync("desktop blocks automatic rerun", RunState.Succeeded, desktopBlocked: true);
+await MainWindow.CheckManualRerunAfterSkipAsync();
+await MainWindow.CheckReopenRerunDetailsAsync();
 
 sealed class MainWindow
 {
@@ -56,7 +69,14 @@ sealed class MainWindow
     private readonly CrashLogStore _crashLogStore;
     private readonly NotificationService _notifications;
     private readonly CancellationTokenSource _appCancellation = new();
-    private WorkflowRunSummary? _lastRunSummary;
+    // RERUN_FIELDS
+    private AppSettings _settings = new();
+    private Task _manualRun = Task.CompletedTask;
+    private IReadOnlyList<IAutomationAdapter> _manualAdapters = [];
+    private bool _isBusy;
+    private bool _isWorkflowLifecycleLocked;
+    private bool IsWorkflowEditingLocked => _isWorkflowLifecycleLocked || _isPreparing || _queue.IsRunning;
+    private bool _isClosePending = false;
     private bool _isPreparing = false, _isClosing = false, _stopAfterCurrentRequested = false;
     private int _scheduledSkipReports = 0;
     private CancellationTokenSource? _preparationCancellation;
@@ -169,7 +189,159 @@ sealed class MainWindow
         finally { window._appCancellation.Dispose(); }
     }
 
+    public static async Task CheckRerunAsync(string name, RunState secondOutcome,
+        bool running = false, bool cancelled = false, bool stopped = false, bool desktopBlocked = false)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "GachaOpsRerunTests", Guid.NewGuid().ToString("N"));
+        var handler = new CaptureHandler(false);
+        var window = new MainWindow(root, handler, desktopBlocked ? "桌面已锁定或会话状态无法确认" : null, cancelled, false);
+        ScheduledDesktopGuard.Block = null;
+        var tasks = new[] {
+            new WorkflowTaskSetting { ToolId = ToolId.BetterGi },
+            new WorkflowTaskSetting { ToolId = ToolId.MaaEnd },
+            new WorkflowTaskSetting { ToolId = ToolId.Maa, Channel = 2 }
+        };
+        var failed = new FakeAdapter(ToolId.BetterGi, () => { })
+        {
+            Outcome = attempt =>
+            {
+                if (stopped) window._stopAfterCurrentRequested = true;
+                return attempt == 1 ? RunState.Failed : secondOutcome;
+            },
+            RunningAfterFirst = running
+        };
+        var next = new FakeAdapter(ToolId.MaaEnd, () => { });
+        var success = new FakeAdapter(ToolId.Maa, () => { });
+        var settings = new AppSettings { WorkflowTasks = tasks.ToList(), AutoRerunFailedTasks = true,
+            NotificationsEnabled = true, NotifyRunResult = true, BarkAddress = "https://example.invalid/test" };
+        try
+        {
+            await window.RunQueueAsync([failed, next, success], tasks, settings);
+            var blocked = running || cancelled || stopped || desktopBlocked;
+            Require(failed.Starts == (blocked ? 1 : 2), name + ": retry count must be bounded.");
+            Require(success.Starts == 1, name + ": successful channel must not rerun.");
+            Require(next.Starts == (!blocked && secondOutcome == RunState.Succeeded ? 1 : 0),
+                name + ": skipped successor must follow normal queue rules.");
+            Require(settings.WorkflowTasks.SequenceEqual(tasks), name + ": original plan must remain intact.");
+            var records = await window._historyStore.ReadAllAsync();
+            var original = records.Where(record => record.ParentWorkflowRunId is null).ToArray();
+            Require(original.Length == 3 && original.Any(record => record.State == RunState.Failed),
+                name + ": preserve original failure.");
+            var rerun = records.Where(record => record.ParentWorkflowRunId is not null).ToArray();
+            Require(rerun.Length == (stopped ? 0 : 2), name + ": independent retry history.");
+            Require(rerun.All(record => record.ParentWorkflowRunId == original[0].WorkflowRunId
+                && record.WorkflowRunId != original[0].WorkflowRunId), name + ": link original run.");
+            Require(handler.Titles.Count == (stopped ? 0 : cancelled ? 1 : 2), name + ": notification decisions.");
+            if (!blocked && secondOutcome == RunState.Succeeded)
+                Require(window._lastRunSummary!.Title == "GachaOps · 临时补做 · 任务已完成",
+                    name + ": successful rerun must not be reported as failure.");
+            Console.WriteLine("PASS: " + name);
+        }
+        finally { window._appCancellation.Dispose(); }
+    }
+
+    public static async Task CheckManualRerunAfterSkipAsync()
+    {
+        const string name = "manual rerun keeps source after scheduled skip";
+        var root = Path.Combine(Path.GetTempPath(), "GachaOpsRerunTests", Guid.NewGuid().ToString("N"));
+        var window = new MainWindow(root, new CaptureHandler(false), null, false, false);
+        var task = new WorkflowTaskSetting { ToolId = ToolId.BetterGi };
+        var adapter = new FakeAdapter(ToolId.BetterGi, () => { })
+            { Outcome = attempt => attempt == 1 ? RunState.Failed : RunState.Succeeded };
+        var settings = new AppSettings { WorkflowTasks = [task], BetterGiProfile = "original-profile" };
+        window._settings = new AppSettings { WorkflowTasks = [task], BetterGiProfile = "current-profile" };
+        window._manualAdapters = [adapter];
+        ScheduledDesktopGuard.Block = null;
+        try
+        {
+            await window.RunQueueAsync([adapter], [task], settings);
+            var originalId = window._lastRunSummary!.WorkflowRunId;
+            await window.ReportScheduledSkipAsync(new ScheduledRequest("08:17", false, DateTimeOffset.Now), "桌面已锁定");
+            var skippedId = window._lastRunSummary!.WorkflowRunId;
+            Require(skippedId != originalId, name + ": skip must replace the displayed summary.");
+            window._isWorkflowLifecycleLocked = true;
+            await window.ShowCompletionWithErrorsWarningAsync("任务失败");
+            Require(adapter.Starts == 1, name + ": closing the reminder must not rerun tasks.");
+            window._acceptRerun = true;
+            window._cancelRerunSelection = true;
+            await window.ShowCompletionWithErrorsWarningAsync("任务失败");
+            Require(adapter.Starts == 1, name + ": cancelling task selection must not rerun tasks.");
+            window._cancelRerunSelection = false;
+            window._acceptRerun = true;
+            await window.ShowCompletionWithErrorsWarningAsync("任务失败");
+            await window._manualRun;
+            var records = await window._historyStore.ReadAllAsync();
+            var retry = records.Single(record => record.State == RunState.Succeeded);
+            Require(retry.ParentWorkflowRunId == originalId && retry.ParentWorkflowRunId != skippedId,
+                name + ": retry history must link to the failed round, not the scheduled skip.");
+            Require(adapter.Starts == 2 && window._lastRunSettings!.BetterGiProfile == "original-profile",
+                name + ": selected task and original configuration must survive the skip.");
+            window._acceptRerun = true;
+            await window.ShowCompletionWithErrorsWarningAsync("更新需检查");
+            Require(adapter.Starts == 2, name + ": no rerun action when all tasks succeeded.");
+            Require(records.Any(record => record.WorkflowRunId == originalId && record.State == RunState.Failed)
+                && records.Any(record => record.WorkflowRunId == skippedId && record.State == RunState.Skipped),
+                name + ": original failure and scheduled skip must remain in history.");
+            Console.WriteLine("PASS: " + name);
+        }
+        finally { window._appCancellation.Dispose(); }
+    }
+
+    public static async Task CheckReopenRerunDetailsAsync()
+    {
+        const string name = "reopen last run details for manual rerun";
+        var root = Path.Combine(Path.GetTempPath(), "GachaOpsRerunTests", Guid.NewGuid().ToString("N"));
+        var window = new MainWindow(root, new CaptureHandler(false), null, false, false);
+        var task = new WorkflowTaskSetting { ToolId = ToolId.BetterGi };
+        var adapter = new FakeAdapter(ToolId.BetterGi, () => { })
+            { Outcome = attempt => attempt == 1 ? RunState.Failed : RunState.Succeeded };
+        var settings = new AppSettings { WorkflowTasks = [task], BetterGiProfile = "original-profile" };
+        window._manualAdapters = [adapter];
+        ScheduledDesktopGuard.Block = null;
+        try
+        {
+            await window.RunQueueAsync([adapter], [task], settings);
+            var originalId = window._lastRunSummary!.WorkflowRunId;
+            await window.ShowLastRunDetailsAsync();
+            Require(adapter.Starts == 1, name + ": closing details must not rerun.");
+            window._acceptRerun = true;
+            window._cancelRerunSelection = true;
+            await window.ShowLastRunDetailsAsync();
+            Require(adapter.Starts == 1, name + ": cancelling selection must not rerun.");
+            window._cancelRerunSelection = false;
+            window._isWorkflowLifecycleLocked = true;
+            window._acceptRerun = true;
+            await window.ShowLastRunDetailsAsync();
+            Require(adapter.Starts == 1, name + ": busy details must not offer rerun.");
+            window._isWorkflowLifecycleLocked = false;
+            var failedSummary = window._lastRunSummary;
+            await window.ReportScheduledSkipAsync(new ScheduledRequest("08:17", false, DateTimeOffset.Now), "桌面已锁定");
+            window._acceptRerun = true;
+            await window.ShowLastRunDetailsAsync();
+            Require(adapter.Starts == 1, name + ": a different displayed round must not rerun the old failure.");
+            window._lastRunSummary = failedSummary;
+            window._acceptRerun = true;
+            await window.ShowLastRunDetailsAsync();
+            var records = await window._historyStore.ReadAllAsync();
+            Require(adapter.Starts == 2, name + ": reopening details can start selected failed tasks.");
+            Require(records.Single(record => record.State == RunState.Succeeded).ParentWorkflowRunId == originalId,
+                name + ": preserve source round.");
+            Require(window._lastRunSettings!.BetterGiProfile == "original-profile", name + ": preserve original configuration.");
+            window._acceptRerun = true;
+            await window.ShowLastRunDetailsAsync();
+            Require(adapter.Starts == 2, name + ": successful round cannot rerun.");
+            Console.WriteLine("PASS: " + name);
+        }
+        finally { window._appCancellation.Dispose(); }
+    }
+
     // These are the UI/clock boundaries; all start decisions below come from source.
+    private Task RunEnabledWorkflowAsync(bool startedAutomatically,
+        IReadOnlyList<WorkflowTaskSetting> temporaryTasks, AppSettings rerunSettings, Guid? parentWorkflowRunId)
+        => _manualRun = RunQueueAsync(_manualAdapters, temporaryTasks, rerunSettings,
+            startedAutomatically: startedAutomatically, parentWorkflowRunId: parentWorkflowRunId);
+    private void UpdateWorkflowInteractionState() { }
+    private Task RefreshHistoryAsync() => Task.CompletedTask;
     private async Task<bool> WaitForStartupRunDelayAsync()
     {
         _countdowns++;
@@ -179,14 +351,15 @@ sealed class MainWindow
     }
     private void ResetLiveLog() { }
     private void UpdateActivityEmptyState() { }
-    private void SetBusy(bool busy, bool canStopQueue = false) { }
+    private void SetBusy(bool busy, bool canStopQueue = false) { _isBusy = busy; _stopAfterCurrentRequested = false; }
     private void SetFooter(string message, Color color) => _footer = message;
     private void HideToolUpdateOverlay() { }
     private Task ShowToolUpdateCompletionAsync(IReadOnlyList<string> items) => Task.CompletedTask;
     private void LogToolUpdateWarnings(IReadOnlyList<ToolPreparationWarning> warnings) { }
     private void ApplyStatus(ToolStatusUpdate update) => _statuses.Enqueue(update);
     private void RestoreWindowForInteraction() => _restores++;
-    private void ShowCompletionWithErrorsWarning(string message) { RestoreWindowForInteraction(); _warnings.Add(message); }
+    private bool _acceptRerun;
+    private bool _cancelRerunSelection;
     private void Close() => _closes++;
     private async Task<bool> PersistRecordAsync(RunRecord record)
     {
@@ -198,17 +371,28 @@ sealed class MainWindow
     // SOURCE_METHODS
     private static class AppDialog
     {
-        public static void ShowModal(MainWindow window, string title, string message, AppDialogKind kind) => window._warnings.Add(message);
+        public static IReadOnlyList<WorkflowTaskSetting> SelectRerunTasks(MainWindow window,
+            IReadOnlyList<WorkflowTaskSetting> tasks) => window._cancelRerunSelection ? [] : tasks;
+        public static bool? ShowModal(MainWindow window, string title, string message, AppDialogKind kind,
+            string? confirmAction = null)
+        {
+            window._warnings.Add(message);
+            var accepted = window._acceptRerun && confirmAction == "临时补做";
+            window._acceptRerun = false;
+            return accepted;
+        }
     }
 }
 sealed class FakeAdapter(ToolId id, Action onValidate) : IAutomationAdapter
 {
+    public Func<int, RunState> Outcome { get; init; } = _ => RunState.Succeeded;
+    public bool RunningAfterFirst { get; init; }
     public ToolId Id => id;
     public string DisplayName => id.ToString();
     private int _starts;
     public int Starts => _starts;
     public ValidationResult Validate(AppSettings settings) { onValidate(); return ValidationResult.Success(); }
-    public bool IsProcessRunning(AppSettings settings) => false;
+    public bool IsProcessRunning(AppSettings settings) => RunningAfterFirst && Starts > 0;
     public ProcessStartInfo BuildStartInfo(AppSettings settings) => throw new InvalidOperationException("No external launches in this test.");
     public Task<AutomationRunHandle> StartAsync(AppSettings settings, CancellationToken cancellationToken)
     {
@@ -217,7 +401,7 @@ sealed class FakeAdapter(ToolId id, Action onValidate) : IAutomationAdapter
             new LogSource(Path.GetTempPath(), "GachaOps-none"), LogCheckpoint.Empty));
     }
     public Task<RunResult> MonitorAsync(AutomationRunHandle handle, AppSettings settings, IProgress<string>? progress, CancellationToken token)
-        => Task.FromResult(new RunResult(RunState.Succeeded, "完成"));
+        => Task.FromResult(new RunResult(Outcome(Starts), "测试结果"));
 }
 sealed class CaptureHandler(bool fails) : HttpMessageHandler
 {
@@ -238,11 +422,13 @@ static class ScheduledDesktopGuard
 }
 sealed class Control { public bool IsEnabled { get; set; } public string Text { get; set; } = ""; }
 sealed class ShutdownState { public bool HasShutdownStarted => false; }
-readonly record struct Color { public static Color FromRgb(byte r, byte g, byte b) => new(); }
+sealed class RoutedEventArgs : EventArgs { }
+namespace System.Windows.Media { readonly record struct Color { public static Color FromRgb(byte r, byte g, byte b) => new(); } }
 enum WindowState { Normal, Minimized }
 enum AppDialogKind { Information, Warning }
 '@
 $fixture = $fixture.Replace('    // SOURCE_METHODS', $methods)
+$fixture = $fixture.Replace('    // RERUN_FIELDS', $rerunFields)
 $testRoot = Join-Path $cliRoot ('scheduled-start-tests\' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
 $testFile = Join-Path $testRoot 'Test.cs'
