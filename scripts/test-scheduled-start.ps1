@@ -48,12 +48,15 @@ await MainWindow.CheckAsync("ordinary startup unchanged", false, true, null, "�
 await MainWindow.CheckAsync("skip survives notification failure", true, true, null, "桌面已锁定或会话状态无法确认", deliveryFails: true);
 await MainWindow.CheckAsync("skip survives history failure", true, true, null, "其他应用处于前台或前台状态无法确认", historyFails: true);
 await MainWindow.CheckAsync("countdown cancellation takes precedence", true, true, null, "桌面已锁定或会话状态无法确认", cancelCountdown: true);
-await MainWindow.CheckRerunAsync("automatic rerun succeeds", RunState.Succeeded);
+await MainWindow.CheckRerunAsync("automatic rerun succeeds after tool exits during countdown", RunState.Succeeded);
 await MainWindow.CheckRerunAsync("automatic rerun fails once", RunState.Failed);
 await MainWindow.CheckRerunAsync("automatic rerun blocked by running process", RunState.Succeeded, running: true);
 await MainWindow.CheckRerunAsync("automatic rerun cancelled", RunState.Succeeded, cancelled: true);
 await MainWindow.CheckRerunAsync("stop prevents automatic rerun", RunState.Succeeded, stopped: true);
-await MainWindow.CheckRerunAsync("desktop blocks automatic rerun", RunState.Succeeded, desktopBlocked: true);
+await MainWindow.CheckRerunAsync("locked desktop before rerun preparation", RunState.Succeeded, desktopBlocked: true);
+await MainWindow.CheckRerunAsync("locked desktop after rerun preparation", RunState.Succeeded, desktopBlockedAfterPreparation: true);
+await MainWindow.CheckRerunAsync("other foreground app permits automatic rerun", RunState.Succeeded, foregroundBusy: true);
+await MainWindow.CheckRerunAsync("closing during countdown blocks automatic rerun", RunState.Succeeded, closeWhileCountdown: true);
 await MainWindow.CheckManualRerunAfterSkipAsync();
 await MainWindow.CheckReopenRerunDetailsAsync();
 
@@ -89,6 +92,7 @@ sealed class MainWindow
     private readonly List<string> _warnings = [];
     private readonly string? _afterDelay;
     private readonly bool _cancelCountdown;
+    private bool _closeWhileCountdown;
     private readonly bool _historyFails;
     private int _countdowns, _restores, _closes;
     private string _footer = "";
@@ -116,7 +120,7 @@ sealed class MainWindow
         var handler = new CaptureHandler(deliveryFails);
         var window = new MainWindow(root, handler, afterDelay, cancelCountdown, historyFails);
         ScheduledDesktopGuard.Block = null;
-        ScheduledDesktopGuard.Checks = 0;
+        ScheduledDesktopGuard.ResetChecks();
         Require(ScheduledLaunch.AdmissionBlock(true, false, true, ScheduledDesktopGuard.Block) is null, "Initial admission must allow the request.");
         var tasks = new[] { ToolId.BetterGi, ToolId.Maa, ToolId.MaaEnd }.Select((id, index) =>
             new WorkflowTaskSetting { ToolId = id, IsEnabled = true, Channel = index == 2 ? 2 : 1 }).ToArray();
@@ -137,8 +141,8 @@ sealed class MainWindow
             Require(window._countdowns == (automatic ? 1 : 0), name + ": countdown behavior changed.");
             Require(window._activePreparationTask is null && window._preparationCancellation is null && !window._isPreparing,
                 name + ": preparation state was not released.");
-            Require(ScheduledDesktopGuard.Checks == (scheduled && !cancelCountdown ? 1 : 0),
-                name + ": recheck must happen once after countdown, only for scheduled runs.");
+            Require(ScheduledDesktopGuard.Checks.SequenceEqual(scheduled && !cancelCountdown ? new[] { true } : []),
+                name + ": only scheduled runs do one strict desktop recheck after countdown.");
             var summary = window._lastRunSummary ?? throw new InvalidOperationException("Missing summary.");
             var records = window.GetActiveRunRecords();
             Require(records.Count == tasks.Length && records.Select(record => record.Id).Distinct().Count() == tasks.Length
@@ -190,25 +194,42 @@ sealed class MainWindow
     }
 
     public static async Task CheckRerunAsync(string name, RunState secondOutcome,
-        bool running = false, bool cancelled = false, bool stopped = false, bool desktopBlocked = false)
+        bool running = false, bool cancelled = false, bool stopped = false, bool desktopBlocked = false,
+        bool desktopBlockedAfterPreparation = false, bool foregroundBusy = false, bool closeWhileCountdown = false)
     {
+        const string lockReason = "桌面已锁定或会话状态无法确认";
         var root = Path.Combine(Path.GetTempPath(), "GachaOpsRerunTests", Guid.NewGuid().ToString("N"));
         var handler = new CaptureHandler(false);
-        var window = new MainWindow(root, handler, desktopBlocked ? "桌面已锁定或会话状态无法确认" : null, cancelled, false);
+        var window = new MainWindow(root, handler, desktopBlocked ? lockReason : null, cancelled, false)
+            { _closeWhileCountdown = closeWhileCountdown };
         ScheduledDesktopGuard.Block = null;
+        ScheduledDesktopGuard.ResetChecks();
+        if (foregroundBusy) ScheduledDesktopGuard.ForegroundBlock = "其他应用处于前台";
         var tasks = new[] {
             new WorkflowTaskSetting { ToolId = ToolId.BetterGi },
             new WorkflowTaskSetting { ToolId = ToolId.MaaEnd },
             new WorkflowTaskSetting { ToolId = ToolId.Maa, Channel = 2 }
         };
-        var failed = new FakeAdapter(ToolId.BetterGi, () => { })
+        var originalFailed = false;
+        (int Countdowns, int DesktopChecks)? firstRetryProcessCheck = null;
+        var failed = new FakeAdapter(ToolId.BetterGi, () =>
+        {
+            if (originalFailed && desktopBlockedAfterPreparation)
+                ScheduledDesktopGuard.Block = lockReason;
+        })
         {
             Outcome = attempt =>
             {
                 if (stopped) window._stopAfterCurrentRequested = true;
-                return attempt == 1 ? RunState.Failed : secondOutcome;
+                originalFailed = attempt == 1;
+                return originalFailed ? RunState.Failed : secondOutcome;
             },
-            RunningAfterFirst = running
+            StillRunningAfterFirst = () => running || window._countdowns == 0,
+            OnCheckProcess = () =>
+            {
+                if (originalFailed)
+                    firstRetryProcessCheck ??= (window._countdowns, ScheduledDesktopGuard.Checks.Count);
+            }
         };
         var next = new FakeAdapter(ToolId.MaaEnd, () => { });
         var success = new FakeAdapter(ToolId.Maa, () => { });
@@ -217,7 +238,16 @@ sealed class MainWindow
         try
         {
             await window.RunQueueAsync([failed, next, success], tasks, settings);
-            var blocked = running || cancelled || stopped || desktopBlocked;
+            var cancelledBeforePreparation = cancelled || closeWhileCountdown;
+            var noPreparation = stopped || cancelledBeforePreparation || desktopBlocked;
+            Require(window._countdowns == (stopped ? 0 : 1), name + ": exactly one countdown for an attempted rerun.");
+            Require(noPreparation ? firstRetryProcessCheck is null : firstRetryProcessCheck == (1, 1),
+                name + ": rerun preparation must wait for countdown and first desktop check.");
+            var expectedDesktopChecks = stopped || cancelledBeforePreparation ? 0 : desktopBlocked || running ? 1 : 2;
+            Require(ScheduledDesktopGuard.Checks.Count == expectedDesktopChecks
+                && ScheduledDesktopGuard.Checks.All(requireIdleForeground => !requireIdleForeground),
+                name + ": rerun check count and foreground policy.");
+            var blocked = running || cancelledBeforePreparation || stopped || desktopBlocked || desktopBlockedAfterPreparation;
             Require(failed.Starts == (blocked ? 1 : 2), name + ": retry count must be bounded.");
             Require(success.Starts == 1, name + ": successful channel must not rerun.");
             Require(next.Starts == (!blocked && secondOutcome == RunState.Succeeded ? 1 : 0),
@@ -231,13 +261,28 @@ sealed class MainWindow
             Require(rerun.Length == (stopped ? 0 : 2), name + ": independent retry history.");
             Require(rerun.All(record => record.ParentWorkflowRunId == original[0].WorkflowRunId
                 && record.WorkflowRunId != original[0].WorkflowRunId), name + ": link original run.");
-            Require(handler.Titles.Count == (stopped ? 0 : cancelled ? 1 : 2), name + ": notification decisions.");
+            if (cancelledBeforePreparation)
+                Require(rerun.All(record => record.State == RunState.Cancelled),
+                    name + ": retain cancelled history without starting any task.");
+            if (desktopBlocked || desktopBlockedAfterPreparation)
+            {
+                Require(rerun.All(record => record.State == RunState.Skipped && record.Message.Contains(lockReason)),
+                    name + ": retain skipped history with the desktop reason.");
+                Require(!window._statuses.Any(status => status.WorkflowRunId == rerun[0].WorkflowRunId
+                    && status.State is RunState.Queued or RunState.Starting or RunState.Running),
+                    name + ": desktop blocks rerun before it reaches the queue.");
+            }
+            Require(handler.Titles.Count == (stopped ? 0 : cancelledBeforePreparation ? 1 : 2), name + ": notification decisions.");
             if (!blocked && secondOutcome == RunState.Succeeded)
                 Require(window._lastRunSummary!.Title == "GachaOps · 临时补做 · 任务已完成",
                     name + ": successful rerun must not be reported as failure.");
             Console.WriteLine("PASS: " + name);
         }
-        finally { window._appCancellation.Dispose(); }
+        finally
+        {
+            ScheduledDesktopGuard.ResetChecks();
+            window._appCancellation.Dispose();
+        }
     }
 
     public static async Task CheckManualRerunAfterSkipAsync()
@@ -347,6 +392,7 @@ sealed class MainWindow
         _countdowns++;
         await Task.Yield();
         if (_afterDelay is not null) ScheduledDesktopGuard.Block = _afterDelay == "allow" ? null : _afterDelay;
+        if (_closeWhileCountdown) _isClosePending = true;
         return !_cancelCountdown;
     }
     private void ResetLiveLog() { }
@@ -386,13 +432,18 @@ sealed class MainWindow
 sealed class FakeAdapter(ToolId id, Action onValidate) : IAutomationAdapter
 {
     public Func<int, RunState> Outcome { get; init; } = _ => RunState.Succeeded;
-    public bool RunningAfterFirst { get; init; }
+    public Func<bool>? StillRunningAfterFirst { get; init; }
+    public Action? OnCheckProcess { get; init; }
     public ToolId Id => id;
     public string DisplayName => id.ToString();
     private int _starts;
     public int Starts => _starts;
     public ValidationResult Validate(AppSettings settings) { onValidate(); return ValidationResult.Success(); }
-    public bool IsProcessRunning(AppSettings settings) => RunningAfterFirst && Starts > 0;
+    public bool IsProcessRunning(AppSettings settings)
+    {
+        OnCheckProcess?.Invoke();
+        return Starts > 0 && StillRunningAfterFirst?.Invoke() == true;
+    }
     public ProcessStartInfo BuildStartInfo(AppSettings settings) => throw new InvalidOperationException("No external launches in this test.");
     public Task<AutomationRunHandle> StartAsync(AppSettings settings, CancellationToken cancellationToken)
     {
@@ -417,8 +468,18 @@ sealed class CaptureHandler(bool fails) : HttpMessageHandler
 static class ScheduledDesktopGuard
 {
     public static string? Block;
-    public static int Checks;
-    public static string? Check() { Checks++; return Block; }
+    public static string? ForegroundBlock;
+    public static List<bool> Checks { get; } = [];
+    public static void ResetChecks()
+    {
+        ForegroundBlock = null;
+        Checks.Clear();
+    }
+    public static string? Check(bool requireIdleForeground = true)
+    {
+        Checks.Add(requireIdleForeground);
+        return Block ?? (requireIdleForeground ? ForegroundBlock : null);
+    }
 }
 sealed class Control { public bool IsEnabled { get; set; } public string Text { get; set; } = ""; }
 sealed class ShutdownState { public bool HasShutdownStarted => false; }

@@ -7,7 +7,7 @@ namespace GachaOps.App;
 
 internal static class ScheduledDesktopGuard
 {
-    public static string? Check()
+    public static string? Check(bool requireIdleForeground = true)
     {
         var session = Process.GetCurrentProcess().SessionId;
         if (!WTSQuerySessionInformation(IntPtr.Zero, session, 8, out var buffer, out var bytes))
@@ -22,6 +22,9 @@ internal static class ScheduledDesktopGuard
             var name = new StringBuilder(256);
             if (!GetUserObjectInformation(desktop, 2, name, name.Capacity * 2, out _))
                 return "无法确认输入桌面";
+            if (!requireIdleForeground)
+                return ScheduledLaunch.DesktopBlock(active, true, name.ToString());
+
             var foreground = GetForegroundWindow();
             if (foreground == IntPtr.Zero) return "无法确认前台窗口";
             var shell = GetShellWindow();
