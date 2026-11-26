@@ -2,7 +2,6 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using GachaOps.Core.Models;
@@ -17,9 +16,7 @@ public partial class MainWindow
     private readonly ScheduledRequest? _initialScheduledRequest;
     private readonly string? _initialScheduledForegroundBlock;
     private bool _scheduleReady;
-    private bool _scheduleAdmissionBusy;
     private bool _initializationComplete;
-    private int _scheduledSkipReports;
 
     private void InitializeScheduleControls()
     {
@@ -134,72 +131,6 @@ public partial class MainWindow
         }
     }
 
-    internal async Task HandleScheduledRequestAsync(ScheduledRequest request, string? foregroundBlock)
-    {
-        var reason = ScheduledLaunch.Validate(_settings, request, DateTimeOffset.Now, TimeZoneInfo.Local, out var date);
-        if (reason is null)
-        {
-            try
-            {
-                if (!new ScheduledLaunchStore(DataRoot).TryClaim(request, date)) return;
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
-            {
-                reason = "无法安全保存定时认领记录";
-                _crashLogStore.TryWrite("ScheduledClaim", exception);
-            }
-        }
-        reason ??= ScheduledLaunch.AdmissionBlock(_initializationComplete,
-            IsWorkflowEditingLocked || _scheduleAdmissionBusy, _scheduleReady, foregroundBlock);
-        if (reason is not null)
-        {
-            await ReportScheduledSkipAsync(request, reason);
-            return;
-        }
-        _scheduleAdmissionBusy = true;
-        try
-        {
-            new ScheduledLaunchStore(DataRoot).Record(request, "进入启动准备");
-            await RunEnabledWorkflowAsync(startedAutomatically: true, scheduledRequest: request);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
-        {
-            _crashLogStore.TryWrite("ScheduledRun", exception);
-            await ReportScheduledSkipAsync(request, "定时入口执行失败，请检查本地诊断日志");
-            RestoreWindowForInteraction();
-        }
-        finally { _scheduleAdmissionBusy = false; }
-    }
-
-    private async Task ReportScheduledSkipAsync(ScheduledRequest request, string reason, bool currentRun = false)
-    {
-        var updateSummary = currentRun || !IsWorkflowEditingLocked;
-        _scheduledSkipReports++;
-        UpdateWorkflowInteractionState();
-        var message = $"定时 {request.Time} 已跳过：{reason}";
-        ScheduleStatusText.Text = message;
-        RestoreWindowForInteraction();
-        try
-        {
-            var report = await ScheduledRunReport.SkipAsync(_settings, request, reason, DataRoot, _historyStore, _notifications);
-            if (_isClosing || Dispatcher.HasShutdownStarted) return;
-            if (updateSummary)
-            {
-                _lastRunSummary = report.Summary;
-                LastRunDetailsButton.IsEnabled = true;
-                SetFooter(message, System.Windows.Media.Color.FromRgb(255, 159, 10));
-            }
-            await RefreshHistoryAsync();
-            if (_isClosing || Dispatcher.HasShutdownStarted) return;
-            if (!report.Persisted) message += "\n历史保存失败，本次跳过未完整保存";
-            if (report.Delivery.Error is { } error) message += $"\n通知发送失败：{error}";
-            RestoreWindowForInteraction();
-            AppDialog.ShowModal(this, "定时未运行", message, AppDialogKind.Warning);
-        }
-        finally
-        {
-            _scheduledSkipReports--;
-            if (!_isClosing) UpdateWorkflowInteractionState();
-        }
-    }
+    internal Task HandleScheduledRequestAsync(ScheduledRequest request, string? foregroundBlock) =>
+        _runner.HandleScheduledRequestAsync(request, foregroundBlock, _initializationComplete, _scheduleReady);
 }
