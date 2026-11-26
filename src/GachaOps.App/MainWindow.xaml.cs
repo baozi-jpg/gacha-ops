@@ -694,10 +694,70 @@ public partial class MainWindow : Window
                 startNotification = SendNotificationAsync(settingsForRun, RunNotificationKind.Started,
                     "GachaOps · 已开始", NotificationService.StartedBody(workflowTasks.Select(task => ToolCatalog.Get(task.ToolId).Name)), scheduledRequest.Time);
         }
+        async Task<bool> CanProceedAsync(IReadOnlyList<WorkflowTaskSetting> tasks, bool showCountdown)
+        {
+            RunState state;
+            string reason;
+            if ((showCountdown && !await WaitForStartupRunDelayAsync())
+                || (automaticRerun && (_isClosePending || _isClosing || _appCancellation.IsCancellationRequested)))
+            {
+                cancelledByUser = true;
+                state = RunState.Cancelled;
+                reason = "已取消本次自动运行";
+            }
+            else if ((scheduledRequest is not null || automaticRerun)
+                && ScheduledDesktopGuard.Check(requireIdleForeground: !automaticRerun) is { } desktopBlock)
+            {
+                scheduledDesktopBlocked = true;
+                state = RunState.Skipped;
+                reason = scheduledRequest is not null
+                    ? $"定时 {scheduledRequest.Time} 已跳过：{desktopBlock}"
+                    : $"自动补做已跳过：{desktopBlock}";
+                if (scheduledRequest is not null) ScheduleStatusText.Text = reason;
+            }
+            else
+            {
+                return true;
+            }
+
+            summaryReason = reason;
+            var endedAt = DateTimeOffset.Now;
+            foreach (var task in tasks)
+            {
+                var record = new RunRecord
+                {
+                    ToolId = task.ToolId,
+                    ToolName = ToolCatalog.Get(task.ToolId).DisplayName,
+                    StartedAt = startedAt,
+                    EndedAt = endedAt,
+                    State = state,
+                    Message = reason,
+                    WorkflowRunId = workflowRunId,
+                    TaskExecutionId = Guid.NewGuid(),
+                    Channel = task.Channel
+                };
+                TrackHistoryWrite(record);
+                ApplyStatus(new ToolStatusUpdate(task.ToolId, state, reason,
+                    WorkflowRunId: workflowRunId, TaskExecutionId: record.TaskExecutionId, Channel: task.Channel));
+            }
+            historyPersisted = await WaitForHistoryWritesAsync();
+            SetFooter(historyPersisted ? reason : $"{reason}，且历史保存失败", Color.FromRgb(255, 159, 10));
+            if (state == RunState.Skipped)
+                completionWarning = historyPersisted ? reason : $"{reason}{Environment.NewLine}历史保存失败";
+            return false;
+        }
+
         _queue.StatusChanged += NotifyActualStart;
         IReadOnlyList<ToolPreparationWarning> updateWarnings = [];
         try
         {
+            if (automaticRerun)
+            {
+                if (!await CanProceedAsync(workflowTasks, showCountdown: true))
+                    return;
+                SetFooter("正在准备启动", Color.FromRgb(0, 122, 255));
+            }
+
             _isPreparing = true;
             using var preparationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 _appCancellation.Token);
@@ -765,70 +825,10 @@ public partial class MainWindow : Window
                 return;
             }
 
-            if (preparation.RunnableTasks.Count > 0
-                && startedAutomatically && !await WaitForStartupRunDelayAsync())
-            {
-                cancelledByUser = true;
-                summaryReason = "已取消本次自动运行";
-                var cancelledAt = DateTimeOffset.Now;
-                foreach (var task in preparation.RunnableTasks)
-                {
-                    var record = new RunRecord
-                    {
-                        ToolId = task.ToolId,
-                        ToolName = ToolCatalog.Get(task.ToolId).DisplayName,
-                        StartedAt = startedAt,
-                        EndedAt = cancelledAt,
-                        State = RunState.Cancelled,
-                        Message = summaryReason,
-                        WorkflowRunId = workflowRunId,
-                        TaskExecutionId = Guid.NewGuid(),
-                        Channel = task.Channel
-                    };
-                    TrackHistoryWrite(record);
-                    ApplyStatus(new ToolStatusUpdate(task.ToolId, record.State, record.Message,
-                        WorkflowRunId: workflowRunId, TaskExecutionId: record.TaskExecutionId, Channel: task.Channel));
-                }
-                historyPersisted = await WaitForHistoryWritesAsync();
-                SetFooter(historyPersisted ? "已取消本次自动运行" : "已取消本次自动运行，且历史保存失败",
-                    Color.FromRgb(255, 159, 10));
-                return;
-            }
-
             if (preparation.RunnableTasks.Count > 0)
             {
-                // Preparation and the countdown can outlive the original desktop admission check.
-                if ((scheduledRequest is not null || automaticRerun) && ScheduledDesktopGuard.Check() is { } foregroundBlock)
-                {
-                    scheduledDesktopBlocked = true;
-                    summaryReason = scheduledRequest is not null
-                        ? $"定时 {scheduledRequest.Time} 已跳过：{foregroundBlock}"
-                        : $"自动补做已跳过：{foregroundBlock}";
-                    if (scheduledRequest is not null) ScheduleStatusText.Text = summaryReason;
-                    var skippedAt = DateTimeOffset.Now;
-                    foreach (var task in preparation.RunnableTasks)
-                    {
-                        var record = new RunRecord
-                        {
-                            ToolId = task.ToolId,
-                            ToolName = ToolCatalog.Get(task.ToolId).DisplayName,
-                            StartedAt = startedAt,
-                            EndedAt = skippedAt,
-                            State = RunState.Skipped,
-                            Message = summaryReason,
-                            WorkflowRunId = workflowRunId,
-                            TaskExecutionId = Guid.NewGuid(),
-                            Channel = task.Channel
-                        };
-                        TrackHistoryWrite(record);
-                        ApplyStatus(new ToolStatusUpdate(task.ToolId, record.State, record.Message,
-                            WorkflowRunId: workflowRunId, TaskExecutionId: record.TaskExecutionId, Channel: task.Channel));
-                    }
-                    historyPersisted = await WaitForHistoryWritesAsync();
-                    SetFooter(summaryReason, Color.FromRgb(255, 159, 10));
-                    completionWarning = historyPersisted ? summaryReason : $"{summaryReason}{Environment.NewLine}历史保存失败";
+                if (!await CanProceedAsync(preparation.RunnableTasks, showCountdown: startedAutomatically && !automaticRerun))
                     return;
-                }
 
                 SetBusy(true, canStopQueue: true);
                 SetFooter("任务队列正在运行", Color.FromRgb(0, 122, 255));

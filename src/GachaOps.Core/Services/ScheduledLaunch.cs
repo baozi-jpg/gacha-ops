@@ -61,12 +61,14 @@ public static class ScheduledLaunch
         return null;
     }
 
+    public static string? DesktopBlock(bool sessionActive, bool inputDesktopAccessible, string? desktopName) =>
+        sessionActive && inputDesktopAccessible && desktopName == "Default" ? null : "桌面已锁定或会话状态无法确认";
+
     public static string? ForegroundBlock(bool sessionActive, bool inputDesktopAccessible,
         string? desktopName, bool ownWindow, bool shellWindow, bool shellProcess, string? windowClass) =>
-        !sessionActive || !inputDesktopAccessible || desktopName != "Default"
-            ? "桌面已锁定或会话状态无法确认"
-            : ownWindow || shellWindow || (shellProcess && windowClass is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
-                ? null : "其他应用处于前台或前台状态无法确认";
+        DesktopBlock(sessionActive, inputDesktopAccessible, desktopName)
+        ?? (ownWindow || shellWindow || (shellProcess && windowClass is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
+            ? null : "其他应用处于前台或前台状态无法确认");
 
     public static string? AdmissionBlock(bool initialized, bool busy, bool registered, string? foregroundBlock) =>
         !initialized ? "程序正在初始化" : busy ? "已有一轮运行或准备中"
