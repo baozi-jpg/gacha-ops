@@ -21,15 +21,9 @@ public partial class MainWindow : Window
     private readonly SettingsStore _settingsStore = new();
     private readonly HistoryStore _historyStore = new();
     private readonly CrashLogStore _crashLogStore = new();
-    private readonly WorkflowRunHistory _runHistory;
-    private readonly AutomationQueueService _queue = new();
     private readonly NotificationService _notifications = new();
-    private WorkflowRunSummary? _lastRunSummary;
-    private IReadOnlyList<WorkflowTaskSetting> _lastRerunTasks = [];
-    private AppSettings? _lastRunSettings;
-    private Guid? _lastRerunWorkflowRunId;
+    private readonly WorkflowRunner _runner;
     private readonly Dictionary<ToolId, IAutomationAdapter> _adapters;
-    private readonly ToolUpdateCoordinator _toolUpdateCoordinator;
     private readonly WorkflowTaskCoordinator _workflow = new();
     private readonly ObservableCollection<HistoryRow> _historyRows = [];
     private readonly ObservableCollection<ActivityItem> _activityItems = [];
@@ -48,12 +42,8 @@ public partial class MainWindow : Window
     private static readonly TimeSpan ToolUpdateCompletionDisplayDuration = TimeSpan.FromSeconds(1);
     private const string StopAfterCurrentReadyText = "停止后续任务";
     private const string StopAfterCurrentAcceptedText = "已停止后续任务";
-    private const string StopAfterCurrentFooterText = "已停止后续任务；当前任务会继续运行";
-    private const string CompletionWithErrorsFooterText = "任务完成，存在执行异常";
-    private const string CompletionWithErrorsAndHistoryFailureFooterText =
-        "任务完成，存在执行异常且历史保存失败";
     private const string SettingsSaveFailureFooterText = "设置未保存，本次改动未生效";
-    private const string SettingsRunSaveFailureFooterText = "设置未保存，本次任务未启动";
+    private const string SettingsRunSaveFailureFooterText = WorkflowRunner.SettingsSaveFailureReason;
     private const string SettingsCloseSaveFailureFooterText = "设置未保存，请重试后关闭";
     private const int MinNoLogTimeoutMinutes = 1;
     private const int MaxNoLogTimeoutMinutes = 180;
@@ -82,16 +72,10 @@ public partial class MainWindow : Window
     private volatile bool _isClosing;
     private bool _isClosePending;
     private bool _allowClose;
-    private bool _isBusy;
     private bool _isWorkflowLifecycleLocked;
     private bool _isStartupCountdownActive;
-    private bool _isPreparing;
     private bool _isShowingToolUpdateCompletion;
     private bool _startupRunCancelled;
-    private CancellationTokenSource? _preparationCancellation;
-    private Task<ToolPreparationResult>? _activePreparationTask;
-    private Task? _activeWorkflowTask;
-    private bool _stopAfterCurrentRequested;
     private bool _logFlushScheduled;
     private int _pendingLogCharacters;
     private int _displayedLogCharacters;
@@ -106,33 +90,23 @@ public partial class MainWindow : Window
         _betterGiProfilesPath = settings.BetterGiPath.Trim();
         _maaProfilesPath = settings.MaaPath.Trim();
         _maaEndInstancesPath = settings.MaaEndPath.Trim();
-        InitializeComponent();
         _adapters = ToolCatalog.CreateAdapters().ToDictionary(adapter => adapter.Id);
-        _toolUpdateCoordinator = new ToolUpdateCoordinator(
+        var preparation = new ToolUpdateCoordinator(
         [
             new BetterGiUpdateProvider(),
             new MaaUpdateProvider(),
             new MaaEndUpdateProvider()
         ]);
 
+        var runHistory = new WorkflowRunHistory(_historyStore, _crashLogStore,
+            ShowSavedHistoryRecordAsync, ShowHistorySaveFailureAsync);
+        _runner = new WorkflowRunner(this, _adapters.Values.ToArray(), preparation, runHistory,
+            _historyStore, _crashLogStore, _notifications, DataRoot, _appCancellation.Token);
+
+        InitializeComponent();
         HistoryGrid.ItemsSource = _historyRows;
         ActivityListBox.ItemsSource = _activityItems;
-        _queue.StatusChanged += update => DispatchToUi(() => ApplyStatus(update));
-        _queue.LogReceived += QueueLogLine;
-        _runHistory = new WorkflowRunHistory(_historyStore, _crashLogStore,
-            ShowSavedHistoryRecordAsync, ShowHistorySaveFailureAsync);
-        _queue.RunRecorded += _runHistory.Record;
         _workflow.WorkflowChanged += Workflow_WorkflowChanged;
-        _toolUpdateCoordinator.UpdateActivityChanged += activity => Dispatcher.BeginInvoke(() =>
-        {
-            if (_isClosing || !_isPreparing || _isShowingToolUpdateCompletion)
-            {
-                return;
-            }
-
-            ShowToolUpdateActivity(activity);
-        });
-
         _isLoadingSettings = true;
         try
         {
@@ -199,7 +173,7 @@ public partial class MainWindow : Window
             _initializationComplete = true;
             if (_initialScheduledRequest is not null)
                 await HandleScheduledRequestAsync(_initialScheduledRequest, _initialScheduledForegroundBlock);
-            else await RunStartupWorkflowIfEnabledAsync();
+            else await _runner.RunStartupIfEnabledAsync();
         }
         catch (OperationCanceledException) when (_appCancellation.IsCancellationRequested)
         {
@@ -372,29 +346,17 @@ public partial class MainWindow : Window
             return;
         }
 
-        var activeWorkflow = _activeWorkflowTask ?? _activePreparationTask;
         _isClosing = true;
         _durationTimer.Stop();
-        _preparationCancellation?.Cancel();
         _appCancellation.Cancel();
-        await _runHistory.WaitForShutdownAsync(activeWorkflow);
+        await _runner.WaitForShutdownAsync();
 
         _allowClose = true;
         Application.Current.Shutdown();
     }
 
     private async void RunAllButton_Click(object sender, RoutedEventArgs e) =>
-        await RunEnabledWorkflowAsync(startedAutomatically: false);
-
-    private async Task RunStartupWorkflowIfEnabledAsync()
-    {
-        if (!_settings.RunWorkflowOnStartup)
-        {
-            return;
-        }
-
-        await RunEnabledWorkflowAsync(startedAutomatically: true);
-    }
+        await _runner.RunManualAsync();
 
     private async Task<bool> WaitForStartupRunDelayAsync()
     {
@@ -461,12 +423,11 @@ public partial class MainWindow : Window
 
     private void CancelToolUpdateButton_Click(object sender, RoutedEventArgs e)
     {
-        if (!_isPreparing || _preparationCancellation is null)
+        if (!_runner.CancelPreparation())
         {
             return;
         }
 
-        _preparationCancellation.Cancel();
         CancelToolUpdateButton.IsEnabled = false;
         ToolUpdateStatusText.Text = "正在取消本次启动";
         SetFooter("正在取消本次启动", Color.FromRgb(255, 159, 10));
@@ -474,7 +435,7 @@ public partial class MainWindow : Window
 
     private void ShowToolUpdateActivity(ToolUpdateActivity activity)
     {
-        if (_preparationCancellation?.IsCancellationRequested == true)
+        if (!_runner.CanCancelPreparation)
         {
             return;
         }
@@ -484,8 +445,7 @@ public partial class MainWindow : Window
         ToolUpdateStatusText.Text = $"{action}：{string.Join("、", activity.Items)}";
         ToolUpdateProgressBar.Visibility = Visibility.Visible;
         CancelToolUpdateButton.Visibility = Visibility.Visible;
-        CancelToolUpdateButton.IsEnabled = _preparationCancellation is not null
-            && !_preparationCancellation.IsCancellationRequested;
+        CancelToolUpdateButton.IsEnabled = _runner.CanCancelPreparation;
         ToolUpdateOverlay.Visibility = Visibility.Visible;
     }
 
@@ -531,496 +491,6 @@ public partial class MainWindow : Window
         ToolUpdateProgressBar.Visibility = Visibility.Visible;
         CancelToolUpdateButton.Visibility = Visibility.Visible;
         CancelToolUpdateButton.IsEnabled = false;
-    }
-
-    private async Task RunEnabledWorkflowAsync(
-        bool startedAutomatically, ScheduledRequest? scheduledRequest = null,
-        IReadOnlyList<WorkflowTaskSetting>? temporaryTasks = null, AppSettings? rerunSettings = null,
-        Guid? parentWorkflowRunId = null)
-    {
-        if (IsWorkflowEditingLocked)
-        {
-            return;
-        }
-
-        _isWorkflowLifecycleLocked = true;
-        UpdateWorkflowInteractionState();
-        try
-        {
-            var settingsForRun = await SaveSettingsFromControlsAsync(SettingsRunSaveFailureFooterText);
-            if (settingsForRun is null)
-            {
-                if (scheduledRequest is not null) await ReportScheduledSkipAsync(scheduledRequest, "设置未保存，本次任务未启动", currentRun: true);
-                else await SummarizeUnstartedRunAsync(_settings, "设置未保存，本次任务未启动");
-                if (startedAutomatically)
-                {
-                    RestoreWindowForInteraction();
-                }
-                return;
-            }
-
-            if (_isClosePending || _isClosing)
-            {
-                return;
-            }
-
-            if (rerunSettings is not null)
-            {
-                // Keep current notification/timeout preferences, but run the original tool configurations.
-                // Read a separate object so these overrides never alter the saved settings.
-                settingsForRun = ReadNormalizedSettingsFromControls();
-                settingsForRun.BetterGiPath = rerunSettings.BetterGiPath;
-                settingsForRun.BetterGiMode = rerunSettings.BetterGiMode;
-                settingsForRun.BetterGiProfile = rerunSettings.BetterGiProfile;
-                settingsForRun.MaaPath = rerunSettings.MaaPath;
-                settingsForRun.MaaProfile = rerunSettings.MaaProfile;
-                settingsForRun.MaaEndPath = rerunSettings.MaaEndPath;
-                settingsForRun.MaaEndInstance = rerunSettings.MaaEndInstance;
-            }
-
-            var snapshot = WorkflowTaskPlan.CreateSnapshot(temporaryTasks ?? settingsForRun.WorkflowTasks!);
-            if (!snapshot.Any(task => task.IsEnabled))
-            {
-                if (scheduledRequest is not null)
-                {
-                    await ReportScheduledSkipAsync(scheduledRequest, "没有已启用任务，本次任务未启动", currentRun: true);
-                    return;
-                }
-                await SummarizeUnstartedRunAsync(settingsForRun, "没有已启用任务，本次任务未启动");
-                if (startedAutomatically)
-                {
-                    RestoreWindowForInteraction();
-                }
-                AppDialog.ShowModal(this, "没有已启用任务",
-                    snapshot.Count == 0 ? "请先在设置中选择使用的工具。" : "请先在总览中启用至少一个任务。",
-                    AppDialogKind.Information);
-                return;
-            }
-
-            var workflowTask = RunQueueAsync(
-                _adapters.Values.ToArray(),
-                WorkflowTaskPlan.CreateEnabledSnapshot(snapshot),
-                settingsForRun,
-                restoreWindowForErrors: startedAutomatically,
-                startedAutomatically: startedAutomatically,
-                minimizeBeforeQueueStart: !startedAutomatically,
-                scheduledRequest: scheduledRequest,
-                parentWorkflowRunId: parentWorkflowRunId);
-            _activeWorkflowTask = workflowTask;
-            await workflowTask;
-        }
-        finally
-        {
-            _activeWorkflowTask = null;
-            _isWorkflowLifecycleLocked = false;
-            UpdateWorkflowInteractionState();
-        }
-    }
-
-    private async Task RunQueueAsync(
-        IReadOnlyList<IAutomationAdapter> adapters,
-        IReadOnlyList<WorkflowTaskSetting> workflowTasks,
-        AppSettings settingsForRun,
-        bool restoreWindowForErrors = false,
-        bool startedAutomatically = false,
-        bool minimizeBeforeQueueStart = false,
-        ScheduledRequest? scheduledRequest = null,
-        Guid? parentWorkflowRunId = null, bool automaticRerun = false)
-    {
-        if (_queue.IsRunning || _isPreparing)
-        {
-            if (restoreWindowForErrors)
-            {
-                RestoreWindowForInteraction();
-            }
-            AppDialog.ShowModal(this, "GachaOps", "已有任务队列正在运行。", AppDialogKind.Information);
-            return;
-        }
-
-        _runHistory.BeginRun(parentWorkflowRunId);
-
-        _lastRunSummary = null;
-        _lastRerunTasks = [];
-        _lastRunSettings = settingsForRun;
-        _lastRerunWorkflowRunId = null;
-        LastRunDetailsButton.IsEnabled = false;
-        ResetLiveLog();
-        _activityItems.Clear();
-        UpdateActivityEmptyState();
-        CopyLogButton.IsEnabled = false;
-        SetBusy(true, canStopQueue: false);
-        SetFooter("正在准备启动", Color.FromRgb(0, 122, 255));
-        var queueFinished = false;
-        var queueResult = QueueRunResult.NotAllPlannedTasksCompleted;
-        var historyPersisted = false;
-        var workflowRunId = Guid.NewGuid();
-        var startedAt = DateTimeOffset.Now;
-        string? summaryReason = null;
-        string? completionWarning = null;
-        var startNotified = 0;
-        var tasksStarted = 0;
-        var cancelledByUser = false;
-        var scheduledDesktopBlocked = false;
-        var shouldRerunAutomatically = false;
-        Task startNotification = Task.CompletedTask;
-        void NotifyActualStart(ToolStatusUpdate update)
-        {
-            if (update.State == RunState.Running) Interlocked.Exchange(ref tasksStarted, 1);
-            if (scheduledRequest is not null && update.State == RunState.Running
-                && Interlocked.CompareExchange(ref startNotified, 1, 0) == 0)
-                startNotification = SendNotificationAsync(settingsForRun, RunNotificationKind.Started,
-                    "GachaOps · 已开始", NotificationService.StartedBody(workflowTasks.Select(task => ToolCatalog.Get(task.ToolId).Name)), scheduledRequest.Time);
-        }
-        async Task<bool> CanProceedAsync(IReadOnlyList<WorkflowTaskSetting> tasks, bool showCountdown)
-        {
-            RunState state;
-            string reason;
-            if ((showCountdown && !await WaitForStartupRunDelayAsync())
-                || (automaticRerun && (_isClosePending || _isClosing || _appCancellation.IsCancellationRequested)))
-            {
-                cancelledByUser = true;
-                state = RunState.Cancelled;
-                reason = "已取消本次自动运行";
-            }
-            else if ((scheduledRequest is not null || automaticRerun)
-                && ScheduledDesktopGuard.Check(requireIdleForeground: !automaticRerun) is { } desktopBlock)
-            {
-                scheduledDesktopBlocked = true;
-                state = RunState.Skipped;
-                reason = scheduledRequest is not null
-                    ? $"定时 {scheduledRequest.Time} 已跳过：{desktopBlock}"
-                    : $"自动补做已跳过：{desktopBlock}";
-                if (scheduledRequest is not null) ScheduleStatusText.Text = reason;
-            }
-            else
-            {
-                return true;
-            }
-
-            summaryReason = reason;
-            var endedAt = DateTimeOffset.Now;
-            foreach (var task in tasks)
-            {
-                var record = new RunRecord
-                {
-                    ToolId = task.ToolId,
-                    ToolName = ToolCatalog.Get(task.ToolId).DisplayName,
-                    StartedAt = startedAt,
-                    EndedAt = endedAt,
-                    State = state,
-                    Message = reason,
-                    WorkflowRunId = workflowRunId,
-                    TaskExecutionId = Guid.NewGuid(),
-                    Channel = task.Channel
-                };
-                _runHistory.Record(record);
-                ApplyStatus(new ToolStatusUpdate(task.ToolId, state, reason,
-                    WorkflowRunId: workflowRunId, TaskExecutionId: record.TaskExecutionId, Channel: task.Channel));
-            }
-            historyPersisted = await _runHistory.WaitForWritesAsync();
-            SetFooter(historyPersisted ? reason : $"{reason}，且历史保存失败", Color.FromRgb(255, 159, 10));
-            if (state == RunState.Skipped)
-                completionWarning = historyPersisted ? reason : $"{reason}{Environment.NewLine}历史保存失败";
-            return false;
-        }
-
-        _queue.StatusChanged += NotifyActualStart;
-        IReadOnlyList<ToolPreparationWarning> updateWarnings = [];
-        try
-        {
-            if (automaticRerun)
-            {
-                if (!await CanProceedAsync(workflowTasks, showCountdown: true))
-                    return;
-                SetFooter("正在准备启动", Color.FromRgb(0, 122, 255));
-            }
-
-            _isPreparing = true;
-            using var preparationCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                _appCancellation.Token);
-            _preparationCancellation = preparationCancellation;
-            var preparationTask = _toolUpdateCoordinator.PrepareAsync(
-                adapters,
-                workflowTasks,
-                settingsForRun,
-                preparationCancellation.Token,
-                _appCancellation.Token);
-            _activePreparationTask = preparationTask;
-            var preparation = await preparationTask;
-            workflowRunId = preparation.WorkflowRunId;
-            if (!preparation.Cancelled && preparation.UpdatedItems.Count > 0)
-            {
-                await ShowToolUpdateCompletionAsync(preparation.UpdatedItems);
-            }
-            else
-            {
-                HideToolUpdateOverlay();
-            }
-            if (preparation.Warnings.Count > 0)
-            {
-                updateWarnings = preparation.Warnings;
-                LogToolUpdateWarnings(updateWarnings);
-            }
-            _activePreparationTask = null;
-            _isPreparing = false;
-            _preparationCancellation = null;
-
-            foreach (var record in preparation.HistoryRecords)
-            {
-                _runHistory.Record(record);
-            }
-
-            foreach (var issue in preparation.Issues)
-            {
-                ApplyStatus(new ToolStatusUpdate(
-                    issue.ToolId,
-                    issue.State,
-                    issue.Message,
-                    WorkflowRunId: issue.WorkflowRunId,
-                    TaskExecutionId: issue.TaskExecutionId,
-                    Channel: issue.Channel));
-            }
-
-            if (preparation.Cancelled)
-            {
-                cancelledByUser = true;
-                summaryReason = "已取消本次启动";
-                historyPersisted = await _runHistory.WaitForWritesAsync();
-                SetFooter(!historyPersisted ? "已取消本次启动，且历史保存失败"
-                        : preparation.Warnings.Count > 0 ? "已停止等待，请检查工具更新" : "已取消本次启动",
-                    Color.FromRgb(255, 159, 10));
-                return;
-            }
-
-            if (!preparation.Succeeded)
-            {
-                historyPersisted = await _runHistory.WaitForWritesAsync();
-                SetFooter("本轮任务未启动", Color.FromRgb(255, 159, 10));
-                var reason = preparation.BlockReason ?? "启动准备失败，请检查配置或安装";
-                summaryReason = reason;
-                completionWarning = historyPersisted ? reason : $"{reason}{Environment.NewLine}历史保存失败";
-                return;
-            }
-
-            if (preparation.RunnableTasks.Count > 0)
-            {
-                if (!await CanProceedAsync(preparation.RunnableTasks, showCountdown: startedAutomatically && !automaticRerun))
-                    return;
-
-                SetBusy(true, canStopQueue: true);
-                SetFooter("任务队列正在运行", Color.FromRgb(0, 122, 255));
-                if (minimizeBeforeQueueStart)
-                {
-                    WindowState = WindowState.Minimized;
-                }
-
-                var runTask = _queue.RunAsync(adapters, preparation.RunnableTasks, settingsForRun, _appCancellation.Token,
-                    preparation.WorkflowRunId);
-                queueResult = await runTask;
-                if (_queue.StartupBlockReason is { } blockReason)
-                {
-                    historyPersisted = await _runHistory.WaitForWritesAsync();
-                    SetFooter("本轮任务未启动", Color.FromRgb(255, 159, 10));
-                    summaryReason = blockReason;
-                    completionWarning = historyPersisted ? blockReason : $"{blockReason}{Environment.NewLine}历史保存失败";
-                    return;
-                }
-            }
-            if (!preparation.Succeeded || _runHistory.GetRecords().Any(record => record.State is
-                RunState.Failed or RunState.TimedOut or RunState.Skipped or RunState.Cancelled))
-                queueResult = QueueRunResult.NotAllPlannedTasksCompleted;
-            queueFinished = true;
-            historyPersisted = await _runHistory.WaitForWritesAsync();
-        }
-        catch (OperationCanceledException)
-        {
-            cancelledByUser = true;
-            summaryReason = "本轮已取消";
-            // Closing GachaOps stops monitoring only; adapters never kill the external process.
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
-        {
-            summaryReason = "本次运行未完成";
-            _crashLogStore.TryWrite("Workflow", exception);
-            historyPersisted = await _runHistory.WaitForWritesAsync();
-            SetFooter("本次运行未完成", Color.FromRgb(255, 59, 48));
-            var details = WorkflowAutomationPolicy.CreateCompletionWithErrorsMessage(
-                QueueRunResult.NotAllPlannedTasksCompleted, _runHistory.GetRecords(),
-                _isClosing || _appCancellation.IsCancellationRequested, historyPersisted, workflowTasks, updateWarnings);
-            completionWarning = details;
-            return;
-        }
-        finally
-        {
-            _queue.StatusChanged -= NotifyActualStart;
-            var endedAt = DateTimeOffset.Now;
-            if (scheduledRequest is not null)
-            {
-                try { new ScheduledLaunchStore(DataRoot).Record(scheduledRequest, summaryReason ?? queueResult.ToString()); }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-                {
-                    historyPersisted = false;
-                    completionWarning = "定时结果保存失败，请查看本轮详情";
-                    _crashLogStore.TryWrite("ScheduledHistory", exception);
-                }
-            }
-            await startNotification;
-            var runRecords = _runHistory.GetRecords();
-            _lastRerunTasks = WorkflowAutomationPolicy.CreateRerunTasks(workflowTasks, runRecords);
-            _lastRerunWorkflowRunId = workflowRunId;
-            shouldRerunAutomatically = WorkflowAutomationPolicy.ShouldRerunAutomatically(
-                settingsForRun, parentWorkflowRunId is not null, queueFinished, historyPersisted,
-                cancelledByUser || _stopAfterCurrentRequested || _isClosePending || _isClosing
-                    || _appCancellation.IsCancellationRequested,
-                runRecords, updateWarnings);
-            _lastRunSummary = WorkflowRunSummary.Create(workflowRunId, startedAt, endedAt,
-                workflowTasks, runRecords, queueResult, historyPersisted, summaryReason, updateWarnings,
-                tasksStarted: Volatile.Read(ref tasksStarted) != 0,
-                skippedScheduledTime: scheduledDesktopBlocked ? scheduledRequest?.Time : null);
-            LastRunDetailsButton.IsEnabled = true;
-            if (parentWorkflowRunId is { } parentId)
-                _lastRunSummary = _lastRunSummary with
-                {
-                    Title = _lastRunSummary.Title.Replace("GachaOps", "GachaOps · 临时补做", StringComparison.Ordinal),
-                    Details = $"临时补做，原工作流 ID：{parentId}{Environment.NewLine}" + _lastRunSummary.Details
-                };
-            if (shouldRerunAutomatically)
-                _lastRunSummary = _lastRunSummary with { Body = _lastRunSummary.Body + Environment.NewLine + "将尝试自动补做一次" };
-            if (!cancelledByUser && !_stopAfterCurrentRequested)
-            {
-                var delivery = await SendNotificationAsync(settingsForRun, RunNotificationKind.Result,
-                    _lastRunSummary.Title, _lastRunSummary.Body, scheduledRequest?.Time);
-                if (scheduledRequest is not null && completionWarning is not null && delivery.Error is { } error)
-                    completionWarning += $"{Environment.NewLine}通知发送失败：{error}";
-            }
-            else
-                NotificationService.RecordDelivery(RunNotificationKind.Result,
-                    new(false, SkippedReason: "用户主动取消或停止"), DataRoot, scheduledRequest?.Time);
-            HideToolUpdateOverlay();
-            _isPreparing = false;
-            _preparationCancellation = null;
-            _activePreparationTask = null;
-            SetBusy(false);
-            if (!_appCancellation.IsCancellationRequested && queueFinished)
-            {
-                if (queueResult == QueueRunResult.AllPlannedTasksCompletedWithErrors)
-                {
-                    SetFooter(
-                        historyPersisted
-                            ? CompletionWithErrorsFooterText
-                            : CompletionWithErrorsAndHistoryFailureFooterText,
-                        Color.FromRgb(255, 159, 10));
-                }
-                else if (queueResult == QueueRunResult.NotAllPlannedTasksCompleted)
-                {
-                    SetFooter(
-                        historyPersisted
-                            ? "任务未全部完成"
-                            : "任务未全部完成，且历史保存失败",
-                        historyPersisted
-                            ? Color.FromRgb(255, 159, 10)
-                            : Color.FromRgb(255, 59, 48));
-                }
-                else if (!historyPersisted)
-                {
-                    SetFooter("任务完成，但历史保存失败", Color.FromRgb(255, 59, 48));
-                }
-                else if (updateWarnings.Count > 0)
-                {
-                    SetFooter("任务完成，更新需检查", Color.FromRgb(255, 159, 10));
-                }
-                else
-                {
-                    SetFooter("任务已完成", Color.FromRgb(52, 199, 89));
-                }
-            }
-            if (completionWarning is not null && !_isClosing && !_appCancellation.IsCancellationRequested)
-            {
-                if (scheduledDesktopBlocked)
-                {
-                    RestoreWindowForInteraction();
-                    AppDialog.ShowModal(this, automaticRerun ? "自动补做未运行" : "定时未运行", completionWarning, AppDialogKind.Warning);
-                }
-                else await ShowCompletionWithErrorsWarningAsync(completionWarning);
-            }
-        }
-
-        if (shouldRerunAutomatically && !_isClosePending && !_isClosing && !_appCancellation.IsCancellationRequested)
-        {
-            var rerunTasks = _lastRerunTasks;
-            await RunQueueAsync(adapters, rerunTasks, settingsForRun,
-                restoreWindowForErrors: true, startedAutomatically: true,
-                parentWorkflowRunId: workflowRunId, automaticRerun: true);
-            return;
-        }
-
-        var shutdownCancellationRequested = _isClosing
-            || _appCancellation.IsCancellationRequested
-            || Dispatcher.HasShutdownStarted;
-        if (_scheduledSkipReports == 0 && WorkflowAutomationPolicy.ShouldExitAfterCompletion(
-                settingsForRun,
-                queueResult,
-                shutdownCancellationRequested,
-                historyPersisted,
-                _runHistory.GetRecords(),
-                updateWarnings))
-        {
-            Close();
-            return;
-        }
-
-        var completionWithErrorsMessage = WorkflowAutomationPolicy.CreateCompletionWithErrorsMessage(
-            queueResult,
-            _runHistory.GetRecords(),
-            shutdownCancellationRequested,
-            historyPersisted,
-            workflowTasks,
-            updateWarnings);
-        if (completionWithErrorsMessage is not null)
-        {
-            await ShowCompletionWithErrorsWarningAsync(completionWithErrorsMessage);
-        }
-    }
-
-    private async Task ShowCompletionWithErrorsWarningAsync(string message)
-    {
-        if (_isClosing || _appCancellation.IsCancellationRequested || Dispatcher.HasShutdownStarted)
-        {
-            return;
-        }
-
-        RestoreWindowForInteraction();
-        var canRerun = !_isBusy && !_isPreparing && !_queue.IsRunning && !_isClosePending
-            && _scheduledSkipReports == 0 && _lastRerunTasks.Count > 0
-            && _lastRunSettings is not null && _lastRerunWorkflowRunId is not null;
-        if (AppDialog.ShowModal(this, "运行提醒", message, AppDialogKind.Warning,
-                confirmAction: canRerun ? "临时补做" : null) == true && canRerun)
-        {
-            // The queue has finished, but its caller still owns the lifecycle lock.
-            // Release it only for the explicitly requested rerun and restore it on return.
-            var lifecycleLocked = _isWorkflowLifecycleLocked;
-            _isWorkflowLifecycleLocked = false;
-            try { await RunManualRerunAsync(); }
-            finally { _isWorkflowLifecycleLocked = lifecycleLocked; }
-        }
-    }
-
-    private void StopAfterCurrentButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (_stopAfterCurrentRequested || !_queue.IsRunning)
-        {
-            return;
-        }
-
-        _stopAfterCurrentRequested = true;
-        UpdateStopAfterCurrentButton(busy: true);
-        SetFooter(StopAfterCurrentFooterText, Color.FromRgb(255, 159, 10));
-
-        if (!_queue.StopAfterCurrent() && !_queue.IsStopAfterCurrentRequested)
-        {
-            _stopAfterCurrentRequested = false;
-            UpdateStopAfterCurrentButton(_queue.IsRunning);
-        }
     }
 
     private async void SettingsToggle_Click(object sender, RoutedEventArgs e)
@@ -1072,7 +542,7 @@ public partial class MainWindow : Window
 
     private bool CanAutoSaveSettings() =>
         !_isLoadingSettings
-        && !_isBusy
+        && !_runner.IsBusy
         && !_isClosePending
         && !_isClosing
         && SettingsControlsPanel.IsEnabled;
@@ -1895,28 +1365,6 @@ public partial class MainWindow : Window
 
     private async void RefreshHistoryButton_Click(object sender, RoutedEventArgs e) => await RefreshHistoryAsync();
 
-    private async Task<NotificationDeliveryResult> SendNotificationAsync(AppSettings settings,
-        RunNotificationKind kind, string title, string body, string? scheduledTime = null)
-    {
-        if (_isClosing) return new(false);
-        var result = await _notifications.SendAsync(settings, kind, title, body, _appCancellation.Token);
-        NotificationService.RecordDelivery(kind, result, DataRoot, scheduledTime);
-        return result;
-    }
-
-    private async Task SummarizeUnstartedRunAsync(AppSettings settings, string reason)
-    {
-        _lastRerunTasks = [];
-        _lastRunSettings = null;
-        _lastRerunWorkflowRunId = null;
-        var now = DateTimeOffset.Now;
-        _lastRunSummary = WorkflowRunSummary.Create(Guid.NewGuid(), now, now,
-            WorkflowTaskPlan.CreateEnabledSnapshot(settings.WorkflowTasks ?? []), [],
-            QueueRunResult.NotAllPlannedTasksCompleted, true, reason, tasksStarted: false);
-        LastRunDetailsButton.IsEnabled = true;
-        await SendNotificationAsync(settings, RunNotificationKind.Result, _lastRunSummary.Title, _lastRunSummary.Body);
-    }
-
     private async void TestNotificationButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button || !Enum.TryParse<NotificationChannel>(button.Tag as string, out var channel)) return;
@@ -2049,32 +1497,7 @@ public partial class MainWindow : Window
         await SaveSettingsFromControlsAsync();
     }
 
-    private async void LastRunDetailsButton_Click(object sender, RoutedEventArgs e) => await ShowLastRunDetailsAsync();
-
-    private async Task ShowLastRunDetailsAsync()
-    {
-        if (_lastRunSummary is { } summary)
-        {
-            var canRerun = !IsWorkflowEditingLocked && !_isClosePending && !_isClosing
-                && !_appCancellation.IsCancellationRequested && _scheduledSkipReports == 0
-                && _lastRerunTasks.Count > 0 && _lastRunSettings is not null
-                && _lastRerunWorkflowRunId == summary.WorkflowRunId;
-            if (AppDialog.ShowModal(this, summary.Title, summary.Details, AppDialogKind.Information,
-                    confirmAction: canRerun ? "临时补做" : null) == true && canRerun
-                && _lastRerunWorkflowRunId == summary.WorkflowRunId)
-                await RunManualRerunAsync();
-        }
-    }
-
-    private async Task RunManualRerunAsync()
-    {
-        if (IsWorkflowEditingLocked || _lastRunSettings is null || _lastRerunWorkflowRunId is not { } parentId) return;
-        var settings = _lastRunSettings;
-        var selected = AppDialog.SelectRerunTasks(this, _lastRerunTasks);
-        if (selected.Count == 0) return;
-        await RunEnabledWorkflowAsync(false, temporaryTasks: selected, rerunSettings: settings,
-            parentWorkflowRunId: parentId);
-    }
+    private async void LastRunDetailsButton_Click(object sender, RoutedEventArgs e) => await _runner.ShowLastRunDetailsAsync();
 
     private void HistoryRunDetailsButton_Click(object sender, RoutedEventArgs e)
     {
@@ -2168,9 +1591,9 @@ public partial class MainWindow : Window
             QueueLogLine(update.ToolId, update.Message);
         _workflow.ApplyStatus(update);
         AddActivity(update);
-        if (_stopAfterCurrentRequested)
+        if (_runner.StopAfterCurrentRequested)
         {
-            SetFooter(StopAfterCurrentFooterText, Color.FromRgb(255, 159, 10));
+            SetFooter(WorkflowRunner.StopAfterCurrentMessage, Color.FromRgb(255, 159, 10));
         }
         else
         {
@@ -2359,7 +1782,7 @@ public partial class MainWindow : Window
     private void UpdateDurations() => _workflow.UpdateDurations(DateTimeOffset.Now);
 
     private bool IsWorkflowEditingLocked =>
-        _isWorkflowLifecycleLocked || _scheduledSkipReports > 0 || _isClosePending || _isClosing || _isBusy || _isPreparing || _queue.IsRunning;
+        _isWorkflowLifecycleLocked || _isClosePending || _isClosing || _runner.IsBusy;
 
     private void UpdateWorkflowInteractionState()
     {
@@ -2376,23 +1799,15 @@ public partial class MainWindow : Window
         UpdateSettingsControlsEnabled();
     }
 
-    private void SetBusy(bool busy, bool canStopQueue = false)
-    {
-        _isBusy = busy;
-        _stopAfterCurrentRequested = false;
-        UpdateWorkflowInteractionState();
-        UpdateStopAfterCurrentButton(busy && canStopQueue);
-    }
-
     private void UpdateSettingsControlsEnabled() =>
         SettingsControlsPanel.IsEnabled = !IsWorkflowEditingLocked;
 
     private void UpdateStopAfterCurrentButton(bool busy)
     {
-        StopAfterCurrentButton.Content = _stopAfterCurrentRequested
+        StopAfterCurrentButton.Content = _runner.StopAfterCurrentRequested
             ? StopAfterCurrentAcceptedText
             : StopAfterCurrentReadyText;
-        StopAfterCurrentButton.IsEnabled = busy && !_stopAfterCurrentRequested;
+        StopAfterCurrentButton.IsEnabled = busy && !_runner.StopAfterCurrentRequested;
     }
 
     private string SelectedBetterGiMode() =>

@@ -66,6 +66,23 @@ public sealed class AppSettings
     [JsonIgnore]
     public TimeSpan HardTimeout => TimeSpan.FromMinutes(Math.Clamp(HardTimeoutMinutes, 5, 720));
 
+    internal AppSettings CreateRunSnapshot(AppSettings? originalToolSettings)
+    {
+        var snapshot = (AppSettings)MemberwiseClone();
+        if (originalToolSettings is not null)
+        {
+            snapshot.BetterGiPath = originalToolSettings.BetterGiPath;
+            snapshot.BetterGiMode = originalToolSettings.BetterGiMode;
+            snapshot.BetterGiProfile = originalToolSettings.BetterGiProfile;
+            snapshot.MaaPath = originalToolSettings.MaaPath;
+            snapshot.MaaProfile = originalToolSettings.MaaProfile;
+            snapshot.MaaEndPath = originalToolSettings.MaaEndPath;
+            snapshot.MaaEndInstance = originalToolSettings.MaaEndInstance;
+        }
+        snapshot.Normalize();
+        return snapshot;
+    }
+
     public void Normalize()
     {
         DailySchedules = (DailySchedules ?? []).Where(item => item is not null && ScheduledLaunch.TryTime(item.Time, out _))
