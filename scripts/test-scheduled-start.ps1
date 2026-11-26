@@ -20,7 +20,6 @@ function Get-SourceSection([string]$start, [string]$end) {
     return $source.Substring($first, $last - $first)
 }
 $methods = (Get-SourceSection '    private async Task RunQueueAsync(' '    private void StopAfterCurrentButton_Click(') +
-    (Get-SourceSection '    private void TrackHistoryWrite(' '    private async Task<bool> PersistRecordAsync(') +
     (Get-SourceSection '    private async Task<NotificationDeliveryResult> SendNotificationAsync(' '    private async Task SummarizeUnstartedRunAsync(') +
     (Get-SourceSection '    private async Task ShowLastRunDetailsAsync(' '    private void HistoryRunDetailsButton_Click(')
 $rerunFields = Get-SourceSection '    private WorkflowRunSummary? _lastRunSummary;' '    private readonly Dictionary<ToolId, IAutomationAdapter> _adapters;'
@@ -62,14 +61,12 @@ await MainWindow.CheckReopenRerunDetailsAsync();
 
 sealed class MainWindow
 {
-    private readonly object _historyWritesLock = new();
-    private readonly List<Task<bool>> _activeHistoryWrites = [];
-    private readonly List<RunRecord> _activeRunRecords = [];
     private readonly List<object> _activityItems = [];
     private readonly AutomationQueueService _queue = new();
     private readonly ToolUpdateCoordinator _toolUpdateCoordinator;
     private readonly HistoryStore _historyStore;
     private readonly CrashLogStore _crashLogStore;
+    private readonly WorkflowRunHistory _runHistory;
     private readonly NotificationService _notifications;
     private readonly CancellationTokenSource _appCancellation = new();
     // RERUN_FIELDS
@@ -93,7 +90,6 @@ sealed class MainWindow
     private readonly string? _afterDelay;
     private readonly bool _cancelCountdown;
     private bool _closeWhileCountdown;
-    private readonly bool _historyFails;
     private int _countdowns, _restores, _closes;
     private string _footer = "";
     private string DataRoot { get; }
@@ -104,12 +100,13 @@ sealed class MainWindow
         DataRoot = root;
         _afterDelay = afterDelay;
         _cancelCountdown = cancelCountdown;
-        _historyFails = historyFails;
         _historyStore = new HistoryStore(root);
+        if (historyFails) Directory.CreateDirectory(_historyStore.HistoryPath);
         _crashLogStore = new CrashLogStore(root);
+        _runHistory = new WorkflowRunHistory(_historyStore, _crashLogStore);
         _notifications = new NotificationService(new HttpClient(handler));
         _toolUpdateCoordinator = new ToolUpdateCoordinator([], new ToolUpdateStateStore(root));
-        _queue.RunRecorded += TrackHistoryWrite;
+        _queue.RunRecorded += _runHistory.Record;
         _queue.StatusChanged += ApplyStatus;
     }
 
@@ -144,7 +141,7 @@ sealed class MainWindow
             Require(ScheduledDesktopGuard.Checks.SequenceEqual(scheduled && !cancelCountdown ? new[] { true } : []),
                 name + ": only scheduled runs do one strict desktop recheck after countdown.");
             var summary = window._lastRunSummary ?? throw new InvalidOperationException("Missing summary.");
-            var records = window.GetActiveRunRecords();
+            var records = window._runHistory.GetRecords();
             Require(records.Count == tasks.Length && records.Select(record => record.Id).Distinct().Count() == tasks.Length
                 && records.Select(record => record.TaskExecutionId).Distinct().Count() == tasks.Length
                 && records.All(record => record.WorkflowRunId == summary.WorkflowRunId && record.TaskExecutionId is not null)
@@ -407,12 +404,6 @@ sealed class MainWindow
     private bool _acceptRerun;
     private bool _cancelRerunSelection;
     private void Close() => _closes++;
-    private async Task<bool> PersistRecordAsync(RunRecord record)
-    {
-        if (_historyFails) return false;
-        await _historyStore.AppendAsync(record);
-        return true;
-    }
     private static void Require(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
     // SOURCE_METHODS
     private static class AppDialog

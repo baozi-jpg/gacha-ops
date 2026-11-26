@@ -21,13 +21,13 @@ public partial class MainWindow : Window
     private readonly SettingsStore _settingsStore = new();
     private readonly HistoryStore _historyStore = new();
     private readonly CrashLogStore _crashLogStore = new();
+    private readonly WorkflowRunHistory _runHistory;
     private readonly AutomationQueueService _queue = new();
     private readonly NotificationService _notifications = new();
     private WorkflowRunSummary? _lastRunSummary;
     private IReadOnlyList<WorkflowTaskSetting> _lastRerunTasks = [];
     private AppSettings? _lastRunSettings;
     private Guid? _lastRerunWorkflowRunId;
-    private Guid? _rerunParentWorkflowRunId;
     private readonly Dictionary<ToolId, IAutomationAdapter> _adapters;
     private readonly ToolUpdateCoordinator _toolUpdateCoordinator;
     private readonly WorkflowTaskCoordinator _workflow = new();
@@ -36,9 +36,6 @@ public partial class MainWindow : Window
     private readonly object _logBufferLock = new();
     private readonly Queue<string> _pendingLogLines = [];
     private readonly Queue<string> _displayedLogLines = [];
-    private readonly object _historyWritesLock = new();
-    private readonly List<Task<bool>> _activeHistoryWrites = [];
-    private readonly List<RunRecord> _activeRunRecords = [];
     private readonly CancellationTokenSource _appCancellation = new();
     private readonly DispatcherTimer _durationTimer;
     private readonly DispatcherTimer _workflowSaveTimer;
@@ -122,7 +119,9 @@ public partial class MainWindow : Window
         ActivityListBox.ItemsSource = _activityItems;
         _queue.StatusChanged += update => DispatchToUi(() => ApplyStatus(update));
         _queue.LogReceived += QueueLogLine;
-        _queue.RunRecorded += TrackHistoryWrite;
+        _runHistory = new WorkflowRunHistory(_historyStore, _crashLogStore,
+            ShowSavedHistoryRecordAsync, ShowHistorySaveFailureAsync);
+        _queue.RunRecorded += _runHistory.Record;
         _workflow.WorkflowChanged += Workflow_WorkflowChanged;
         _toolUpdateCoordinator.UpdateActivityChanged += activity => Dispatcher.BeginInvoke(() =>
         {
@@ -378,27 +377,10 @@ public partial class MainWindow : Window
         _durationTimer.Stop();
         _preparationCancellation?.Cancel();
         _appCancellation.Cancel();
-        await WaitForClosingWorkflowAsync(activeWorkflow);
+        await _runHistory.WaitForShutdownAsync(activeWorkflow);
 
         _allowClose = true;
         Application.Current.Shutdown();
-    }
-
-    private async Task WaitForClosingWorkflowAsync(Task? activeWorkflow)
-    {
-        if (activeWorkflow is not null)
-        {
-            try
-            {
-                await activeWorkflow;
-            }
-            catch (Exception exception)
-            {
-                _crashLogStore.TryWrite("WorkflowShutdown", exception);
-            }
-        }
-
-        await WaitForHistoryWritesAsync();
     }
 
     private async void RunAllButton_Click(object sender, RoutedEventArgs e) =>
@@ -655,17 +637,12 @@ public partial class MainWindow : Window
             return;
         }
 
-        lock (_historyWritesLock)
-        {
-            _activeHistoryWrites.Clear();
-            _activeRunRecords.Clear();
-        }
+        _runHistory.BeginRun(parentWorkflowRunId);
 
         _lastRunSummary = null;
         _lastRerunTasks = [];
         _lastRunSettings = settingsForRun;
         _lastRerunWorkflowRunId = null;
-        _rerunParentWorkflowRunId = parentWorkflowRunId;
         LastRunDetailsButton.IsEnabled = false;
         ResetLiveLog();
         _activityItems.Clear();
@@ -736,11 +713,11 @@ public partial class MainWindow : Window
                     TaskExecutionId = Guid.NewGuid(),
                     Channel = task.Channel
                 };
-                TrackHistoryWrite(record);
+                _runHistory.Record(record);
                 ApplyStatus(new ToolStatusUpdate(task.ToolId, state, reason,
                     WorkflowRunId: workflowRunId, TaskExecutionId: record.TaskExecutionId, Channel: task.Channel));
             }
-            historyPersisted = await WaitForHistoryWritesAsync();
+            historyPersisted = await _runHistory.WaitForWritesAsync();
             SetFooter(historyPersisted ? reason : $"{reason}，且历史保存失败", Color.FromRgb(255, 159, 10));
             if (state == RunState.Skipped)
                 completionWarning = historyPersisted ? reason : $"{reason}{Environment.NewLine}历史保存失败";
@@ -790,7 +767,7 @@ public partial class MainWindow : Window
 
             foreach (var record in preparation.HistoryRecords)
             {
-                TrackHistoryWrite(record);
+                _runHistory.Record(record);
             }
 
             foreach (var issue in preparation.Issues)
@@ -808,7 +785,7 @@ public partial class MainWindow : Window
             {
                 cancelledByUser = true;
                 summaryReason = "已取消本次启动";
-                historyPersisted = await WaitForHistoryWritesAsync();
+                historyPersisted = await _runHistory.WaitForWritesAsync();
                 SetFooter(!historyPersisted ? "已取消本次启动，且历史保存失败"
                         : preparation.Warnings.Count > 0 ? "已停止等待，请检查工具更新" : "已取消本次启动",
                     Color.FromRgb(255, 159, 10));
@@ -817,7 +794,7 @@ public partial class MainWindow : Window
 
             if (!preparation.Succeeded)
             {
-                historyPersisted = await WaitForHistoryWritesAsync();
+                historyPersisted = await _runHistory.WaitForWritesAsync();
                 SetFooter("本轮任务未启动", Color.FromRgb(255, 159, 10));
                 var reason = preparation.BlockReason ?? "启动准备失败，请检查配置或安装";
                 summaryReason = reason;
@@ -842,18 +819,18 @@ public partial class MainWindow : Window
                 queueResult = await runTask;
                 if (_queue.StartupBlockReason is { } blockReason)
                 {
-                    historyPersisted = await WaitForHistoryWritesAsync();
+                    historyPersisted = await _runHistory.WaitForWritesAsync();
                     SetFooter("本轮任务未启动", Color.FromRgb(255, 159, 10));
                     summaryReason = blockReason;
                     completionWarning = historyPersisted ? blockReason : $"{blockReason}{Environment.NewLine}历史保存失败";
                     return;
                 }
             }
-            if (!preparation.Succeeded || GetActiveRunRecords().Any(record => record.State is
+            if (!preparation.Succeeded || _runHistory.GetRecords().Any(record => record.State is
                 RunState.Failed or RunState.TimedOut or RunState.Skipped or RunState.Cancelled))
                 queueResult = QueueRunResult.NotAllPlannedTasksCompleted;
             queueFinished = true;
-            historyPersisted = await WaitForHistoryWritesAsync();
+            historyPersisted = await _runHistory.WaitForWritesAsync();
         }
         catch (OperationCanceledException)
         {
@@ -865,10 +842,10 @@ public partial class MainWindow : Window
         {
             summaryReason = "本次运行未完成";
             _crashLogStore.TryWrite("Workflow", exception);
-            historyPersisted = await WaitForHistoryWritesAsync();
+            historyPersisted = await _runHistory.WaitForWritesAsync();
             SetFooter("本次运行未完成", Color.FromRgb(255, 59, 48));
             var details = WorkflowAutomationPolicy.CreateCompletionWithErrorsMessage(
-                QueueRunResult.NotAllPlannedTasksCompleted, GetActiveRunRecords(),
+                QueueRunResult.NotAllPlannedTasksCompleted, _runHistory.GetRecords(),
                 _isClosing || _appCancellation.IsCancellationRequested, historyPersisted, workflowTasks, updateWarnings);
             completionWarning = details;
             return;
@@ -888,7 +865,7 @@ public partial class MainWindow : Window
                 }
             }
             await startNotification;
-            var runRecords = GetActiveRunRecords();
+            var runRecords = _runHistory.GetRecords();
             _lastRerunTasks = WorkflowAutomationPolicy.CreateRerunTasks(workflowTasks, runRecords);
             _lastRerunWorkflowRunId = workflowRunId;
             shouldRerunAutomatically = WorkflowAutomationPolicy.ShouldRerunAutomatically(
@@ -985,7 +962,7 @@ public partial class MainWindow : Window
                 queueResult,
                 shutdownCancellationRequested,
                 historyPersisted,
-                GetActiveRunRecords(),
+                _runHistory.GetRecords(),
                 updateWarnings))
         {
             Close();
@@ -994,7 +971,7 @@ public partial class MainWindow : Window
 
         var completionWithErrorsMessage = WorkflowAutomationPolicy.CreateCompletionWithErrorsMessage(
             queueResult,
-            GetActiveRunRecords(),
+            _runHistory.GetRecords(),
             shutdownCancellationRequested,
             historyPersisted,
             workflowTasks,
@@ -2141,83 +2118,30 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private void TrackHistoryWrite(RunRecord record)
+    private Task ShowSavedHistoryRecordAsync(RunRecord record)
     {
-        if (_rerunParentWorkflowRunId is { } parent)
-            record = record with { ParentWorkflowRunId = parent };
-        var writeTask = PersistRecordAsync(record);
-        lock (_historyWritesLock)
+        if (_isClosing || Dispatcher.HasShutdownStarted) return Task.CompletedTask;
+        return Dispatcher.InvokeAsync(() =>
         {
-            _activeHistoryWrites.Add(writeTask);
-            _activeRunRecords.Add(record);
-        }
-    }
-
-    private IReadOnlyList<RunRecord> GetActiveRunRecords()
-    {
-        lock (_historyWritesLock)
-        {
-            return _activeRunRecords.ToArray();
-        }
-    }
-
-    private async Task<bool> WaitForHistoryWritesAsync()
-    {
-        Task<bool>[] writes;
-        lock (_historyWritesLock)
-        {
-            writes = _activeHistoryWrites.ToArray();
-        }
-
-        if (writes.Length == 0)
-        {
-            return true;
-        }
-
-        var results = await Task.WhenAll(writes);
-        return results.All(result => result);
-    }
-
-    private async Task<bool> PersistRecordAsync(RunRecord record)
-    {
-        try
-        {
-            // Stopping monitoring must not cancel the final cancellation/skipped records.
-            await _historyStore.AppendAsync(record);
-            if (_isClosing || Dispatcher.HasShutdownStarted) return true;
-            await Dispatcher.InvokeAsync(() =>
+            var insertionIndex = 0;
+            while (insertionIndex < _historyRows.Count &&
+                   HistoryStore.LatestFirstComparer.Compare(_historyRows[insertionIndex].Record, record) <= 0)
             {
-                var insertionIndex = 0;
-                while (insertionIndex < _historyRows.Count &&
-                       HistoryStore.LatestFirstComparer.Compare(_historyRows[insertionIndex].Record, record) <= 0)
-                {
-                    insertionIndex++;
-                }
-
-                _historyRows.Insert(insertionIndex, HistoryRow.From(record));
-                while (_historyRows.Count > MaxHistoryRows)
-                {
-                    _historyRows.RemoveAt(_historyRows.Count - 1);
-                }
-                UpdateHistoryEmptyState();
-            });
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
-            return false;
-        }
-        catch (Exception exception)
-        {
-            _crashLogStore.TryWrite("History", exception);
-            if (!Dispatcher.HasShutdownStarted)
-            {
-                await Dispatcher.InvokeAsync(() =>
-                    SetFooter("历史保存失败", Color.FromRgb(255, 59, 48)));
+                insertionIndex++;
             }
-            return false;
-        }
+
+            _historyRows.Insert(insertionIndex, HistoryRow.From(record));
+            while (_historyRows.Count > MaxHistoryRows)
+            {
+                _historyRows.RemoveAt(_historyRows.Count - 1);
+            }
+            UpdateHistoryEmptyState();
+        }).Task;
     }
+
+    private Task ShowHistorySaveFailureAsync() => Dispatcher.HasShutdownStarted
+        ? Task.CompletedTask
+        : Dispatcher.InvokeAsync(() => SetFooter("历史保存失败", Color.FromRgb(255, 59, 48))).Task;
 
     private void RestoreWindowForInteraction()
     {

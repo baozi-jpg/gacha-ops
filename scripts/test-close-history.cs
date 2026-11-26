@@ -1,84 +1,99 @@
-#:property TargetFramework=net10.0-windows
-#:property UseWPF=true
+#:property TargetFramework=net10.0
 #:property OutputType=Exe
 #:property PublishAot=false
 #:property PublishTrimmed=false
-#:project ../src/GachaOps.App/GachaOps.App.csproj
+#:project ../src/GachaOps.Core/GachaOps.Core.csproj
 
-using System.IO;
-using System.Reflection;
-using System.Runtime.CompilerServices;
-using GachaOps.App;
 using GachaOps.Core.Models;
 using GachaOps.Core.Services;
 
-// Exercise the real WPF persistence methods without constructing a window, loading
-// user settings, registering scheduled tasks, or starting external tools.
 var root = Path.Combine(Path.GetTempPath(), "GachaOpsCloseHistoryTests", Guid.NewGuid().ToString("N"));
 var history = new HistoryStore(root);
-using var cancellation = new CancellationTokenSource();
-var window = (MainWindow)RuntimeHelpers.GetUninitializedObject(typeof(MainWindow));
-SetField("_historyStore", history);
-SetField("_crashLogStore", new CrashLogStore(root));
-SetField("_appCancellation", cancellation);
-SetField("_historyWritesLock", new object());
-SetField("_activeHistoryWrites", new List<Task<bool>>());
-SetField("_activeRunRecords", new List<RunRecord>());
-SetField("_isClosing", true);
-cancellation.Cancel();
-
-var workflowId = Guid.NewGuid();
-var cancelled = Record(ToolId.BetterGi, RunState.Cancelled, 1);
-var skipped = Record(ToolId.Maa, RunState.Skipped, 1);
-var completed = Record(ToolId.MaaEnd, RunState.Succeeded, 2);
+var crashLog = new CrashLogStore(root);
+var crashPath = Path.Combine(root, "crashes", "crash.jsonl");
+var timeout = TimeSpan.FromSeconds(5);
 try
 {
-    var saved = await Invoke<Task<bool>>("PersistRecordAsync", cancelled);
-    Require(saved, "Closing must still persist cancellation history after monitoring is cancelled.");
-    var records = await history.ReadAllAsync();
-    Require(records.Count == 1 && records[0].Id == cancelled.Id,
-        "Cancellation history must survive reopening the history store.");
-    Console.WriteLine("PASS: cancelled monitoring does not cancel history persistence");
+    var runHistory = new WorkflowRunHistory(history, crashLog);
+    var originalWorkflowId = Guid.NewGuid();
+    var original = Record(originalWorkflowId, ToolId.BetterGi, RunState.Failed, 1);
+    runHistory.BeginRun(parentWorkflowRunId: null);
+    runHistory.Record(original);
+    Require(await runHistory.WaitForWritesAsync().WaitAsync(timeout), "The original round must persist.");
 
+    var workflowId = Guid.NewGuid();
+    var cancelled = Record(workflowId, ToolId.BetterGi, RunState.Cancelled, 1);
+    var skipped = Record(workflowId, ToolId.Maa, RunState.Skipped, 1);
+    var completed = Record(workflowId, ToolId.MaaEnd, RunState.Succeeded, 2);
+    runHistory.BeginRun(originalWorkflowId);
+    Require(runHistory.GetRecords().Count == 0, "The rerun must start with an empty record snapshot.");
+
+    using var monitoring = new CancellationTokenSource();
+    var monitorStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var registration = monitoring.Token.Register(monitorStopped.SetResult);
     var emitRecords = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     async Task FinishWorkflowAsync()
     {
+        await monitorStopped.Task;
+        runHistory.Record(cancelled);
         await emitRecords.Task;
-        Invoke<object?>("TrackHistoryWrite", skipped);
-        Invoke<object?>("TrackHistoryWrite", completed);
+        runHistory.Record(skipped);
+        runHistory.Record(completed);
     }
 
     var workflow = FinishWorkflowAsync();
-    var close = Invoke<Task>("WaitForClosingWorkflowAsync", workflow);
+    monitoring.Cancel();
+    var close = runHistory.WaitForShutdownAsync(workflow);
     Require(!close.IsCompleted, "Closing must wait for the workflow to publish its final records.");
     emitRecords.SetResult();
-    await close.WaitAsync(TimeSpan.FromSeconds(5));
-    records = await new HistoryStore(root).ReadAllAsync();
-    Require(records.Count == 3 && records.Select(record => record.Id).Distinct().Count() == 3,
+    await close.WaitAsync(timeout);
+    var records = await new HistoryStore(root).ReadAllAsync();
+    Require(records.Count == 4 && records.Select(record => record.Id).Distinct().Count() == 4,
         "Closing must await all final history writes exactly once.");
-    Require(records.All(record => record.WorkflowRunId == workflowId)
-        && records.Single(record => record.Id == skipped.Id).TaskExecutionId == skipped.TaskExecutionId
-        && records.Single(record => record.Id == completed.Id).Channel == 2,
-        "Closing must preserve workflow, task and channel identities.");
-    Console.WriteLine("PASS: closing waits for delayed records and preserves both channels");
+    Require(records.Single(record => record.Id == original.Id).ParentWorkflowRunId is null,
+        "The original history must keep its own identity.");
+    foreach (var expected in new[] { cancelled, skipped, completed })
+    {
+        var saved = records.Single(record => record.Id == expected.Id);
+        Require(saved.State == expected.State && saved.WorkflowRunId == workflowId
+            && saved.ParentWorkflowRunId == originalWorkflowId
+            && saved.TaskExecutionId == expected.TaskExecutionId && saved.Channel == expected.Channel,
+            "Closing must preserve outcome, workflow, parent, task and channel identities.");
+    }
+    var snapshot = runHistory.GetRecords();
+    Require(snapshot.Count == 3 && snapshot.All(record => record.ParentWorkflowRunId == originalWorkflowId),
+        "The active records must contain only the rerun and retain its parent.");
+    Console.WriteLine("PASS: closing saves cancelled monitoring and delayed rerun records exactly once across both channels");
 
-    var writeGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    ((List<Task<bool>>)GetField("_activeHistoryWrites")!).Add(writeGate.Task);
-    close = Invoke<Task>("WaitForClosingWorkflowAsync", Task.FromException(new InvalidOperationException("test workflow failure")));
+    var unwritableHistory = new HistoryStore(Path.Combine(root, "failed-write"));
+    Directory.CreateDirectory(unwritableHistory.HistoryPath);
+    var failureReported = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var finishFailedWrite = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var failedHistory = new WorkflowRunHistory(unwritableHistory, crashLog, onSaveFailed: () =>
+    {
+        failureReported.SetResult();
+        return finishFailedWrite.Task;
+    });
+    failedHistory.BeginRun(parentWorkflowRunId: null);
+    failedHistory.Record(original);
+    await failureReported.Task.WaitAsync(timeout);
+    close = failedHistory.WaitForShutdownAsync(Task.FromException(new InvalidOperationException("test workflow failure")));
     Require(!close.IsCompleted, "A workflow failure must not bypass pending history writes.");
-    writeGate.SetResult(false);
-    await close.WaitAsync(TimeSpan.FromSeconds(5));
+    finishFailedWrite.SetResult();
+    await close.WaitAsync(timeout);
+    Require(!await failedHistory.WaitForWritesAsync().WaitAsync(timeout), "A failed save must be reported as unsuccessful.");
+    Require(File.ReadAllText(crashPath).Contains("WorkflowShutdown", StringComparison.Ordinal),
+        "Closing must log the workflow failure.");
     Console.WriteLine("PASS: workflow failure still drains pending history writes");
 }
 finally
 {
     // Only delete files produced by this isolated test, leaving directories alone.
     if (File.Exists(history.HistoryPath)) File.Delete(history.HistoryPath);
-    var crashPath = Path.Combine(root, "crashes", "crash.jsonl");
     if (File.Exists(crashPath)) File.Delete(crashPath);
 }
 
-RunRecord Record(ToolId tool, RunState state, int channel) => new()
+static RunRecord Record(Guid workflowId, ToolId tool, RunState state, int channel) => new()
 {
     ToolId = tool,
     ToolName = tool.ToString(),
@@ -91,13 +106,7 @@ RunRecord Record(ToolId tool, RunState state, int channel) => new()
     Channel = channel
 };
 
-void SetField(string name, object value) => Field(name).SetValue(window, value);
-object? GetField(string name) => Field(name).GetValue(window);
-FieldInfo Field(string name) => typeof(MainWindow).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
-    ?? throw new InvalidOperationException($"Missing field: {name}");
-T Invoke<T>(string name, params object?[] arguments) => (T)typeof(MainWindow)
-    .GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(window, arguments)!;
-void Require(bool condition, string message)
+static void Require(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
 }
