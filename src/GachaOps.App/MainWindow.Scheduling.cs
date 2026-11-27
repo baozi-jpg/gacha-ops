@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -12,7 +11,6 @@ namespace GachaOps.App;
 public partial class MainWindow
 {
     internal static string DataRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GachaOps");
-    private readonly ObservableCollection<DailySchedule> _scheduleRows = [];
     private readonly ScheduledRequest? _initialScheduledRequest;
     private readonly string? _initialScheduledForegroundBlock;
     private bool _scheduleReady;
@@ -24,13 +22,31 @@ public partial class MainWindow
         ScheduleMinuteComboBox.ItemsSource = new[] { "00", "15", "30", "45" };
         ScheduleHourComboBox.Text = "08";
         ScheduleMinuteComboBox.Text = "00";
-        ScheduleList.ItemsSource = _scheduleRows;
+        ApplySavedScheduleToControls();
+    }
+
+    private void ApplySavedScheduleToControls()
+    {
         ScheduledLaunchCheckBox.IsChecked = _settings.ScheduledLaunchEnabled;
-        foreach (var item in _settings.DailySchedules) _scheduleRows.Add(item);
+        if (ScheduleList.ItemsSource is not IEnumerable<DailySchedule> displayed
+            || !displayed.SequenceEqual(_settings.DailySchedules))
+            ScheduleList.ItemsSource = _settings.DailySchedules;
+    }
+
+    private bool CanEditSchedule() => CanAutoSaveSettings() && ScheduleSettingsPanel.IsEnabled;
+
+    private async void ScheduledLaunchToggle_Click(object sender, RoutedEventArgs e)
+    {
+        var enabled = ScheduledLaunchCheckBox.IsChecked == true;
+        ScheduledLaunchCheckBox.IsChecked = _settings.ScheduledLaunchEnabled;
+        if (CanEditSchedule() && enabled != _settings.ScheduledLaunchEnabled)
+            await SaveScheduleEditAsync(enabled: enabled);
     }
 
     private async void AddScheduleButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!CanEditSchedule()) return;
+
         ScheduleHourErrorBorder.ClearValue(Border.BorderBrushProperty);
         ScheduleMinuteErrorBorder.ClearValue(Border.BorderBrushProperty);
         var hourValid = ScheduledLaunch.TryTime($"{ScheduleHourComboBox.Text}:00", out _);
@@ -48,54 +64,55 @@ public partial class MainWindow
         ScheduleHourComboBox.Text = time.Hour.ToString("D2");
         ScheduleMinuteComboBox.Text = time.Minute.ToString("D2");
         var text = time.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
-        if (_scheduleRows.Any(item => item.Time == text))
+        var rows = _settings.DailySchedules;
+        if (rows.Any(item => item.Time == text))
         {
             ScheduleStatusText.Text = "该时刻已添加";
             return;
         }
-        var conflict = ScheduledLaunch.FindConflictingTime(_scheduleRows, text);
-        _scheduleRows.Add(new(text, IsEnabled: conflict is null));
-        if (await SaveSettingsFromControlsAsync() is not null && conflict is not null)
-            ScheduleStatusText.Text = $"已添加但未启用：与 {conflict} 间隔不足一小时";
+        var conflict = ScheduledLaunch.FindConflictingTime(rows, text);
+        await SaveScheduleEditAsync(rows: [.. rows, new(text, IsEnabled: conflict is null)],
+            successText: conflict is null ? null : $"已添加但未启用：与 {conflict} 间隔不足一小时");
     }
 
     private async void ScheduleRowToggle_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is CheckBox { DataContext: DailySchedule item } check)
+        if (sender is not CheckBox { DataContext: DailySchedule item } check) return;
+
+        var enabled = check.IsChecked == true;
+        check.SetCurrentValue(CheckBox.IsCheckedProperty, item.IsEnabled);
+        var rows = _settings.DailySchedules;
+        if (!CanEditSchedule() || enabled == item.IsEnabled || !rows.Contains(item)) return;
+        if (enabled && ScheduledLaunch.FindConflictingTime(rows, item.Time) is { } conflict)
         {
-            if (check.IsChecked == true && ScheduledLaunch.FindConflictingTime(_scheduleRows, item.Time) is { } conflict)
-            {
-                check.IsChecked = false;
-                ScheduleStatusText.Text = $"无法启用：与 {conflict} 间隔不足一小时";
-                return;
-            }
-            _scheduleRows[_scheduleRows.IndexOf(item)] = item with { IsEnabled = check.IsChecked == true };
-            await SaveSettingsFromControlsAsync();
+            ScheduleStatusText.Text = $"无法启用：与 {conflict} 间隔不足一小时";
+            return;
         }
+        await SaveScheduleEditAsync(rows: rows.Select(row => row == item ? row with { IsEnabled = enabled } : row).ToList());
     }
 
     private async void RemoveScheduleButton_Click(object sender, RoutedEventArgs e)
     {
-        if (CanAutoSaveSettings() && sender is Button { DataContext: DailySchedule item })
+        if (CanEditSchedule() && sender is Button { DataContext: DailySchedule item }
+            && _settings.DailySchedules.Contains(item))
         {
-            var index = _scheduleRows.IndexOf(item);
-            if (index < 0) return;
-            _isWorkflowLifecycleLocked = true;
-            UpdateWorkflowInteractionState();
-            try
-            {
-                _scheduleRows.RemoveAt(index);
-                if (await SaveSettingsFromControlsAsync() is null)
-                {
-                    _scheduleRows.Insert(index, item);
-                    ScheduleStatusText.Text = "设置保存失败，该时刻未移除";
-                }
-            }
-            finally
-            {
-                _isWorkflowLifecycleLocked = false;
-                UpdateWorkflowInteractionState();
-            }
+            await SaveScheduleEditAsync(rows: _settings.DailySchedules.Where(row => row != item).ToList());
+        }
+    }
+
+    private async Task SaveScheduleEditAsync(bool? enabled = null, List<DailySchedule>? rows = null, string? successText = null)
+    {
+        ScheduleSettingsPanel.IsEnabled = false;
+        try
+        {
+            if (await SaveSettingsFromControlsAsync(scheduleChange: (enabled, rows)) is null)
+                ScheduleStatusText.Text = "定时设置未保存，请重试";
+            else if (_scheduleReady && successText is not null)
+                ScheduleStatusText.Text = successText;
+        }
+        finally
+        {
+            ScheduleSettingsPanel.IsEnabled = true;
         }
     }
 
@@ -105,14 +122,12 @@ public partial class MainWindow
         && left.NotificationsEnabled == right.NotificationsEnabled
         && left.NotifyBeforeScheduledRun == right.NotifyBeforeScheduledRun;
 
-    private void RefreshScheduledRegistration()
+    private void RefreshScheduledRegistration(bool settingsSaved = false)
     {
         _scheduleReady = false;
         try
         {
-            var executable = Environment.ProcessPath ?? throw new InvalidOperationException("无法确定程序路径");
-            var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("无法确认当前用户");
-            ScheduledTaskRegistration.Synchronize(_settings, executable, sid);
+            _synchronizeScheduledTasks(_settings);
             if (_settings.ScheduledLaunchEnabled && ScheduledLaunch.SpacingBlock(_settings.DailySchedules) is { } conflict)
             {
                 ScheduleStatusText.Text = $"定时已暂停：{conflict}";
@@ -126,9 +141,17 @@ public partial class MainWindow
         catch (Exception exception) when (exception is COMException or UnauthorizedAccessException or InvalidOperationException or IOException
             or System.Xml.XmlException or System.Security.SecurityException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
         {
-            ScheduleStatusText.Text = "定时不可用：计划任务注册或停用失败，请检查权限后重新打开";
+            const string failure = "计划任务未能同步，请检查权限后重新打开程序";
+            ScheduleStatusText.Text = settingsSaved ? $"设置已保存。{failure}" : failure;
             _crashLogStore.TryWrite("ScheduledRegistration", exception);
         }
+    }
+
+    private static void SynchronizeWindowsScheduledTasks(AppSettings settings)
+    {
+        var executable = Environment.ProcessPath ?? throw new InvalidOperationException("无法确定程序路径");
+        var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("无法确认当前用户");
+        ScheduledTaskRegistration.Synchronize(settings, executable, sid);
     }
 
     internal Task HandleScheduledRequestAsync(ScheduledRequest request, string? foregroundBlock) =>

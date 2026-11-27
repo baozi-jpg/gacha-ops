@@ -35,6 +35,9 @@ jobs:
       - name: Check closing history persistence
         run: dotnet run --file scripts/test-close-history.cs --configuration Release
 
+      - name: Check schedule settings persistence
+        run: dotnet run --file scripts/test-schedule-settings.cs --configuration Release
+
       - name: Run workflow runner integration tests
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-scheduled-start.ps1
 
