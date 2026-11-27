@@ -62,6 +62,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("定时请求向已有实例转交", ScheduledLaunchTests.PipeAsync),
     ("定时跳过历史通知与保存失败", ScheduledLaunchTests.SkipReportAsync),
     ("Bark 设置兼容旧文件并保留独立子选择", NotificationSettingsRoundTripAsync),
+    ("通知渠道启停和移除保存在独立快照中", NotificationChannelSnapshotsAsync),
     ("通知总开关及子开关均阻止请求", NotificationSwitchesGateRequestsAsync),
     ("自建 Bark 前缀与设备密钥使用 JSON 提交", BarkCustomEndpointAsync),
     ("Bark 失败与响应原文均不泄漏密钥", BarkFailuresAreSanitizedAsync),
@@ -557,6 +558,55 @@ static async Task NotificationChannelsRoundTripAsync()
     invalid.Normalize();
     Assert.Equal("invalid-private-address", invalid.Bark!.DeviceKey, "异常旧数据保留在遮罩字段");
     Assert.Equal("", invalid.Bark.ServerAddress, "不猜测异常旧地址的目标");
+}
+
+static async Task NotificationChannelSnapshotsAsync()
+{
+    using var area = TestArea.Create();
+    var store = new SettingsStore(area.Root);
+    var settings = new AppSettings
+    {
+        Bark = new() { IsEnabled = false, DeviceKey = "fixture-device" },
+        Ntfy = new(),
+        QqEmail = new() { IsEnabled = false, SenderAddress = " fixture@qq.com " },
+        Qq = new() { AppId = " fixture-app " }
+    };
+    await store.SaveAsync(settings);
+
+    var saved = (await store.LoadAsync()).Settings;
+    var candidate = saved.CreateRunSnapshot(null);
+    candidate.Bark = null;
+    candidate.Ntfy = candidate.Ntfy! with { IsEnabled = false };
+    candidate.QqEmail = candidate.QqEmail! with { IsEnabled = true };
+    candidate.Qq = null;
+    var run = candidate.CreateRunSnapshot(saved);
+    Assert.True(run.Bark is null && run.Ntfy is { IsEnabled: false }
+        && run.QqEmail is { IsEnabled: true } && run.Qq is null, "补做使用当前轮次的通知渠道状态");
+    Assert.Equal("fixture@qq.com", run.QqEmail!.SenderAddress, "保存和运行共用发件人规范化");
+
+    using (File.Open(store.SettingsPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+        try
+        {
+            await store.SaveAsync(candidate);
+            throw new InvalidOperationException("锁定的设置文件应阻止覆盖");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            var reloaded = (await store.LoadAsync()).Settings;
+            Assert.Equal(saved.Bark, reloaded.Bark, "失败的移除不会覆盖已保存的 Bark");
+            Assert.Equal(saved.Ntfy, reloaded.Ntfy, "失败的停用不会覆盖已保存的 ntfy");
+            Assert.Equal(saved.QqEmail, reloaded.QqEmail, "失败的启用不会覆盖已保存的 QQ 邮箱");
+            Assert.Equal(saved.Qq, reloaded.Qq, "失败的移除不会覆盖已保存的 QQ 绑定配置");
+        }
+    }
+
+    await store.SaveAsync(candidate);
+    var restored = (await store.LoadAsync()).Settings;
+    Assert.Equal(run.Bark, restored.Bark, "移除的 Bark 保持移除");
+    Assert.Equal(run.Ntfy, restored.Ntfy, "停用的 ntfy 保留默认配置");
+    Assert.Equal(run.QqEmail, restored.QqEmail, "重新启用的 QQ 邮箱保留配置");
+    Assert.Equal(run.Qq, restored.Qq, "移除的 QQ 保持移除");
 }
 
 static async Task NtfyRequestAsync()

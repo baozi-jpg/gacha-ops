@@ -99,6 +99,9 @@ public sealed class AppSettings
         if (Ntfy is { } ntfy)
             Ntfy = ntfy with { ServerAddress = ntfy.ServerAddress?.Trim() ?? string.Empty,
                 Topic = ntfy.Topic?.Trim() ?? string.Empty, AccessToken = ntfy.AccessToken?.Trim() ?? string.Empty };
+        if (QqEmail is { } email)
+            QqEmail = email with { SenderAddress = email.SenderAddress?.Trim() ?? string.Empty,
+                RecipientAddress = email.RecipientAddress?.Trim() ?? string.Empty };
         if (Qq is { } qq)
             Qq = qq with { AppId = qq.AppId?.Trim() ?? string.Empty,
                 UserOpenId = qq.UserOpenId?.Trim() ?? string.Empty, AppSecret = qq.AppSecret?.Trim() ?? string.Empty };
