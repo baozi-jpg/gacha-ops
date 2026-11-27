@@ -618,7 +618,7 @@
                         </Expander>
 
                         <Expander Header="外部通知" Style="{StaticResource SettingsExpanderStyle}">
-                            <StackPanel>
+                            <StackPanel x:Name="NotificationSettingsPanel">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="112" />
@@ -662,7 +662,7 @@
                                     <DockPanel LastChildFill="True">
                                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                                             <CheckBox x:Name="BarkEnabledCheckBox" Content="使用" VerticalAlignment="Center"
-                                                      AutomationProperties.Name="启用 Bark 渠道" Click="SettingsToggle_Click" />
+                                                      Tag="Bark" AutomationProperties.Name="启用 Bark 渠道" Click="NotificationChannelEnabled_Click" />
                                             <Button Content="测试" Tag="Bark" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}"
                                                     AutomationProperties.Name="测试 Bark 通知" Click="TestNotificationButton_Click" />
                                             <Button Content="移除" Tag="Bark" Margin="8,0,0,0" Style="{StaticResource SecondaryButton}"
@@ -697,7 +697,7 @@
                                     <DockPanel LastChildFill="True">
                                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                                             <CheckBox x:Name="NtfyEnabledCheckBox" Content="使用" VerticalAlignment="Center"
-                                                      AutomationProperties.Name="启用 ntfy 渠道" Click="SettingsToggle_Click" />
+                                                      Tag="Ntfy" AutomationProperties.Name="启用 ntfy 渠道" Click="NotificationChannelEnabled_Click" />
                                             <Button Content="测试" Tag="Ntfy" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}"
                                                     AutomationProperties.Name="测试 ntfy 通知" Click="TestNotificationButton_Click" />
                                             <Button Content="移除" Tag="Ntfy" Margin="8,0,0,0" Style="{StaticResource SecondaryButton}"
@@ -737,7 +737,7 @@
                                     <DockPanel LastChildFill="True">
                                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                                             <CheckBox x:Name="QqEnabledCheckBox" Content="使用" VerticalAlignment="Center"
-                                                      AutomationProperties.Name="启用 QQ 渠道" Click="SettingsToggle_Click" />
+                                                      Tag="Qq" AutomationProperties.Name="启用 QQ 渠道" Click="NotificationChannelEnabled_Click" />
                                             <Button x:Name="QqTestNotificationButton" Content="测试" Tag="Qq" Margin="12,0,0,0"
                                                     Style="{StaticResource SecondaryButton}" AutomationProperties.Name="测试 QQ 通知"
                                                     Click="TestNotificationButton_Click" />
@@ -788,7 +788,7 @@
                                     <DockPanel LastChildFill="True">
                                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                                             <CheckBox x:Name="QqEmailEnabledCheckBox" Content="使用" VerticalAlignment="Center"
-                                                      AutomationProperties.Name="启用 QQ 邮箱渠道" Click="SettingsToggle_Click" />
+                                                      Tag="QqEmail" AutomationProperties.Name="启用 QQ 邮箱渠道" Click="NotificationChannelEnabled_Click" />
                                             <Button Content="测试" Tag="QqEmail" Margin="12,0,0,0" Style="{StaticResource SecondaryButton}"
                                                     AutomationProperties.Name="测试 QQ 邮箱通知" Click="TestNotificationButton_Click" />
                                             <Button Content="移除" Tag="QqEmail" Margin="8,0,0,0" Style="{StaticResource SecondaryButton}"

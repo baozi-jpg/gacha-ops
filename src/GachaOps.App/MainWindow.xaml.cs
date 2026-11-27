@@ -548,20 +548,25 @@ public partial class MainWindow : Window
         && SettingsControlsPanel.IsEnabled;
 
     private async Task<AppSettings?> SaveSettingsFromControlsAsync(
-        string failureFooterText = SettingsSaveFailureFooterText)
+        string failureFooterText = SettingsSaveFailureFooterText,
+        (NotificationChannel Channel, NotificationChannelEdit Edit)? channelChange = null)
     {
-        // Reconcile paths before taking any save/run snapshot, including saves from other controls.
-        var profileError = RunWithSettingsAutoSaveSuppressed(RefreshChangedProfilePaths);
-        if (profileError is not null)
-        {
-            SetFooter(profileError, Color.FromRgb(255, 59, 48));
-        }
-        var targetWorkflowRevision = _workflowRevision;
-        var settings = ReadNormalizedSettingsFromControls();
         _workflowSaveTimer.Stop();
         await _settingsSaveGate.WaitAsync(_appCancellation.Token);
+        AppSettings settings;
         try
         {
+            // Read channel records after earlier saves have finished.
+            var profileError = RunWithSettingsAutoSaveSuppressed(RefreshChangedProfilePaths);
+            if (profileError is not null)
+            {
+                SetFooter(profileError, Color.FromRgb(255, 59, 48));
+            }
+            var targetWorkflowRevision = _workflowRevision;
+            settings = ReadNormalizedSettingsFromControls();
+            if (channelChange is { } change)
+                EditNotificationChannel(settings, change.Channel, change.Edit);
+
             if (!SettingsAreEquivalent(settings, _settings)
                 || targetWorkflowRevision > _savedWorkflowRevision)
             {
@@ -575,9 +580,20 @@ public partial class MainWindow : Window
             {
                 settings = _settings;
             }
+            if (channelChange is { } savedChange)
+            {
+                ApplyNotificationChannelToControls(savedChange.Channel,
+                    loadFields: savedChange.Edit is NotificationChannelEdit.Add or NotificationChannelEdit.Remove);
+                if (savedChange.Edit is NotificationChannelEdit.Add or NotificationChannelEdit.Remove)
+                    RefreshNotificationChannelChoices();
+                if (savedChange is (NotificationChannel.Qq, NotificationChannelEdit.Remove))
+                    QqBindingStatus.Text = string.Empty;
+            }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (channelChange is { } failedChange)
+                ApplyNotificationChannelToControls(failedChange.Channel, loadFields: false);
             SetFooter(failureFooterText, Color.FromRgb(255, 59, 48));
             return null;
         }
@@ -691,38 +707,32 @@ public partial class MainWindow : Window
             NotifyBeforeScheduledRun = NotifyBeforeScheduledRunCheckBox.IsChecked == true,
             NotifyRunStarted = NotifyRunStartedCheckBox.IsChecked == true,
             NotifyRunResult = NotifyRunResultCheckBox.IsChecked == true,
-            Bark = BarkChannelPanel.Visibility == Visibility.Visible ? new()
+            Bark = _settings.Bark is { } bark ? bark with
             {
-                IsEnabled = BarkEnabledCheckBox.IsChecked == true,
                 ServerAddress = BarkServerTextBox.Text,
                 DeviceKey = BarkDeviceKeyPasswordBox.Password
             } : null,
-            Ntfy = NtfyChannelPanel.Visibility == Visibility.Visible ? new()
+            Ntfy = _settings.Ntfy is { } ntfy ? ntfy with
             {
-                IsEnabled = NtfyEnabledCheckBox.IsChecked == true,
                 ServerAddress = NtfyServerTextBox.Text,
                 Topic = NtfyTopicTextBox.Text,
                 AccessToken = NtfyTokenPasswordBox.Password
             } : null,
-            QqEmail = QqEmailChannelPanel.Visibility == Visibility.Visible ? new()
+            QqEmail = _settings.QqEmail is { } email ? email with
             {
-                IsEnabled = QqEmailEnabledCheckBox.IsChecked == true,
-                SenderAddress = QqEmailSenderTextBox.Text.Trim(),
-                RecipientAddress = QqEmailRecipientTextBox.Text.Trim(),
+                SenderAddress = QqEmailSenderTextBox.Text,
+                RecipientAddress = QqEmailRecipientTextBox.Text,
                 AuthorizationCode = QqEmailCodePasswordBox.Password,
-                ProtectedAuthorizationCode = _settings.QqEmail?.ProtectedAuthorizationCode ?? string.Empty,
-                CredentialUnavailable = _settings.QqEmail?.CredentialUnavailable == true
+                CredentialUnavailable = email.CredentialUnavailable
                     && string.IsNullOrEmpty(QqEmailCodePasswordBox.Password)
             } : null,
-            Qq = QqChannelPanel.Visibility == Visibility.Visible ? new()
+            Qq = _settings.Qq is { } qq ? qq with
             {
-                IsEnabled = QqEnabledCheckBox.IsChecked == true,
-                AppId = QqAppIdTextBox.Text.Trim(),
-                UserOpenId = QqUserOpenIdTextBox.Text.Trim(),
+                AppId = QqAppIdTextBox.Text,
+                UserOpenId = QqUserOpenIdTextBox.Text,
                 AppSecret = QqAppSecretPasswordBox.Password,
-                ProtectedAppSecret = _settings.Qq?.ProtectedAppSecret ?? string.Empty,
-                CredentialUnavailable = _settings.Qq?.CredentialUnavailable == true
-                    && string.IsNullOrEmpty(QqAppSecretPasswordBox.Password)
+                CredentialUnavailable = qq.CredentialUnavailable
+                    && string.IsNullOrWhiteSpace(QqAppSecretPasswordBox.Password)
             } : null,
             WorkflowTasks = ReadSelectedWorkflow(),
             NoLogTimeoutMinutes = noLogMinutes,
@@ -1401,100 +1411,158 @@ public partial class MainWindow : Window
         _ => throw new ArgumentOutOfRangeException(nameof(channel))
     };
 
+    private enum NotificationChannelEdit { Add, Remove, Enable, Disable }
+
+    private static void EditNotificationChannel(AppSettings settings, NotificationChannel channel,
+        NotificationChannelEdit edit)
+    {
+        var enabled = edit == NotificationChannelEdit.Enable;
+        switch (channel)
+        {
+            case NotificationChannel.Bark:
+                settings.Bark = edit switch
+                {
+                    NotificationChannelEdit.Add => settings.Bark ?? new(),
+                    NotificationChannelEdit.Remove => null,
+                    _ => settings.Bark is { } bark ? bark with { IsEnabled = enabled } : null
+                };
+                break;
+            case NotificationChannel.Ntfy:
+                settings.Ntfy = edit switch
+                {
+                    NotificationChannelEdit.Add => settings.Ntfy ?? new(),
+                    NotificationChannelEdit.Remove => null,
+                    _ => settings.Ntfy is { } ntfy ? ntfy with { IsEnabled = enabled } : null
+                };
+                break;
+            case NotificationChannel.QqEmail:
+                settings.QqEmail = edit switch
+                {
+                    NotificationChannelEdit.Add => settings.QqEmail ?? new(),
+                    NotificationChannelEdit.Remove => null,
+                    _ => settings.QqEmail is { } email ? email with { IsEnabled = enabled } : null
+                };
+                break;
+            case NotificationChannel.Qq:
+                settings.Qq = edit switch
+                {
+                    NotificationChannelEdit.Add => settings.Qq ?? new(),
+                    NotificationChannelEdit.Remove => null,
+                    _ => settings.Qq is { } qq ? qq with { IsEnabled = enabled } : null
+                };
+                break;
+        }
+    }
+
     private void LoadNotificationChannels()
     {
-        BarkChannelPanel.Visibility = _settings.Bark is null ? Visibility.Collapsed : Visibility.Visible;
-        BarkEnabledCheckBox.IsChecked = _settings.Bark?.IsEnabled ?? true;
-        BarkServerTextBox.Text = _settings.Bark?.ServerAddress ?? "https://api.day.app";
-        BarkDeviceKeyPasswordBox.Password = _settings.Bark?.DeviceKey ?? string.Empty;
-        NtfyChannelPanel.Visibility = _settings.Ntfy is null ? Visibility.Collapsed : Visibility.Visible;
-        NtfyEnabledCheckBox.IsChecked = _settings.Ntfy?.IsEnabled ?? true;
-        NtfyServerTextBox.Text = _settings.Ntfy?.ServerAddress ?? "https://ntfy.sh";
-        NtfyTopicTextBox.Text = _settings.Ntfy?.Topic ?? string.Empty;
-        NtfyTokenPasswordBox.Password = _settings.Ntfy?.AccessToken ?? string.Empty;
-        QqEmailChannelPanel.Visibility = _settings.QqEmail is null ? Visibility.Collapsed : Visibility.Visible;
-        QqEmailEnabledCheckBox.IsChecked = _settings.QqEmail?.IsEnabled ?? true;
-        QqEmailSenderTextBox.Text = _settings.QqEmail?.SenderAddress ?? string.Empty;
-        QqEmailRecipientTextBox.Text = _settings.QqEmail?.RecipientAddress ?? string.Empty;
-        QqEmailCodePasswordBox.Password = _settings.QqEmail?.AuthorizationCode ?? string.Empty;
-        QqEmailCredentialError.Visibility = _settings.QqEmail?.CredentialUnavailable == true ? Visibility.Visible : Visibility.Collapsed;
-        QqChannelPanel.Visibility = _settings.Qq is null ? Visibility.Collapsed : Visibility.Visible;
-        QqEnabledCheckBox.IsChecked = _settings.Qq?.IsEnabled ?? true;
-        QqAppIdTextBox.Text = _settings.Qq?.AppId ?? string.Empty;
-        QqAppSecretPasswordBox.Password = _settings.Qq?.AppSecret ?? string.Empty;
-        QqUserOpenIdTextBox.Text = _settings.Qq?.UserOpenId ?? string.Empty;
-        QqCredentialError.Visibility = _settings.Qq?.CredentialUnavailable == true ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var channel in Enum.GetValues<NotificationChannel>())
+            ApplyNotificationChannelToControls(channel, loadFields: true);
         RefreshNotificationChannelChoices();
+    }
+
+    private void ApplyNotificationChannelToControls(NotificationChannel channel, bool loadFields)
+    {
+        switch (channel)
+        {
+            case NotificationChannel.Bark:
+                var bark = _settings.Bark ?? new();
+                BarkChannelPanel.Visibility = _settings.Bark is null ? Visibility.Collapsed : Visibility.Visible;
+                BarkEnabledCheckBox.IsChecked = bark.IsEnabled;
+                if (!loadFields) break;
+                BarkServerTextBox.Text = bark.ServerAddress;
+                BarkDeviceKeyPasswordBox.Password = bark.DeviceKey;
+                break;
+            case NotificationChannel.Ntfy:
+                var ntfy = _settings.Ntfy ?? new();
+                NtfyChannelPanel.Visibility = _settings.Ntfy is null ? Visibility.Collapsed : Visibility.Visible;
+                NtfyEnabledCheckBox.IsChecked = ntfy.IsEnabled;
+                if (!loadFields) break;
+                NtfyServerTextBox.Text = ntfy.ServerAddress;
+                NtfyTopicTextBox.Text = ntfy.Topic;
+                NtfyTokenPasswordBox.Password = ntfy.AccessToken;
+                break;
+            case NotificationChannel.QqEmail:
+                var email = _settings.QqEmail ?? new();
+                QqEmailChannelPanel.Visibility = _settings.QqEmail is null ? Visibility.Collapsed : Visibility.Visible;
+                QqEmailEnabledCheckBox.IsChecked = email.IsEnabled;
+                QqEmailCredentialError.Visibility = email.CredentialUnavailable ? Visibility.Visible : Visibility.Collapsed;
+                if (!loadFields) break;
+                QqEmailSenderTextBox.Text = email.SenderAddress;
+                QqEmailRecipientTextBox.Text = email.RecipientAddress;
+                QqEmailCodePasswordBox.Password = email.AuthorizationCode;
+                break;
+            case NotificationChannel.Qq:
+                var qq = _settings.Qq ?? new();
+                QqChannelPanel.Visibility = _settings.Qq is null ? Visibility.Collapsed : Visibility.Visible;
+                QqEnabledCheckBox.IsChecked = qq.IsEnabled;
+                QqCredentialError.Visibility = qq.CredentialUnavailable ? Visibility.Visible : Visibility.Collapsed;
+                if (!loadFields) break;
+                QqAppIdTextBox.Text = qq.AppId;
+                QqAppSecretPasswordBox.Password = qq.AppSecret;
+                QqUserOpenIdTextBox.Text = qq.UserOpenId;
+                break;
+        }
     }
 
     private void RefreshNotificationChannelChoices()
     {
-        AddBarkChannelItem.IsEnabled = BarkChannelPanel.Visibility != Visibility.Visible;
-        AddNtfyChannelItem.IsEnabled = NtfyChannelPanel.Visibility != Visibility.Visible;
-        AddQqEmailChannelItem.IsEnabled = QqEmailChannelPanel.Visibility != Visibility.Visible;
-        AddQqChannelItem.IsEnabled = QqChannelPanel.Visibility != Visibility.Visible;
-        NotificationChannelComboBox.SelectedItem = AddBarkChannelItem.IsEnabled ? AddBarkChannelItem
-            : AddNtfyChannelItem.IsEnabled ? AddNtfyChannelItem
-            : AddQqEmailChannelItem.IsEnabled ? AddQqEmailChannelItem
-            : AddQqChannelItem.IsEnabled ? AddQqChannelItem : null;
+        AddBarkChannelItem.IsEnabled = _settings.Bark is null;
+        AddNtfyChannelItem.IsEnabled = _settings.Ntfy is null;
+        AddQqEmailChannelItem.IsEnabled = _settings.QqEmail is null;
+        AddQqChannelItem.IsEnabled = _settings.Qq is null;
+        // IsEnabled also reflects the parent panel, which is disabled while saving.
+        NotificationChannelComboBox.SelectedItem = _settings.Bark is null ? AddBarkChannelItem
+            : _settings.Ntfy is null ? AddNtfyChannelItem
+            : _settings.QqEmail is null ? AddQqEmailChannelItem
+            : _settings.Qq is null ? AddQqChannelItem : null;
         AddNotificationChannelButton.IsEnabled = NotificationChannelComboBox.SelectedItem is not null;
-        NotificationChannelComboBox.IsEnabled = AddNotificationChannelButton.IsEnabled;
+        NotificationChannelComboBox.IsEnabled = NotificationChannelComboBox.SelectedItem is not null;
     }
 
     private async void AddNotificationChannel_Click(object sender, RoutedEventArgs e)
     {
-        if (!CanAutoSaveSettings() || NotificationChannelComboBox.SelectedItem is not ComboBoxItem item) return;
-        if (item == AddBarkChannelItem) BarkChannelPanel.Visibility = Visibility.Visible;
-        else if (item == AddNtfyChannelItem) NtfyChannelPanel.Visibility = Visibility.Visible;
-        else if (item == AddQqEmailChannelItem) QqEmailChannelPanel.Visibility = Visibility.Visible;
-        else if (item == AddQqChannelItem) QqChannelPanel.Visibility = Visibility.Visible;
-        RefreshNotificationChannelChoices();
-        await SaveSettingsFromControlsAsync();
+        if (!CanAutoSaveSettings() || !NotificationSettingsPanel.IsEnabled
+            || NotificationChannelComboBox.SelectedItem is not ComboBoxItem item
+            || !Enum.TryParse<NotificationChannel>(item.Tag as string, out var channel)) return;
+        await SaveNotificationChannelEditAsync(channel, NotificationChannelEdit.Add);
+    }
+
+    private async void NotificationChannelEnabled_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox checkBox
+            || !Enum.TryParse<NotificationChannel>(checkBox.Tag as string, out var channel)) return;
+        if (!CanAutoSaveSettings() || !NotificationSettingsPanel.IsEnabled)
+        {
+            ApplyNotificationChannelToControls(channel, loadFields: false);
+            return;
+        }
+        await SaveNotificationChannelEditAsync(channel, checkBox.IsChecked == true
+            ? NotificationChannelEdit.Enable : NotificationChannelEdit.Disable);
     }
 
     private async void RemoveNotificationChannel_Click(object sender, RoutedEventArgs e)
     {
-        if (!CanAutoSaveSettings() || sender is not Button button) return;
+        if (!CanAutoSaveSettings() || !NotificationSettingsPanel.IsEnabled || sender is not Button button) return;
         if (!Enum.TryParse<NotificationChannel>(button.Tag as string, out var channel)) return;
         if (AppDialog.ShowModal(this, "移除渠道", $"移除 {NotificationChannelName(channel)} 渠道及其保存的凭据？",
             AppDialogKind.Warning) != true) return;
-        if (channel == NotificationChannel.Bark)
-        {
-            BarkChannelPanel.Visibility = Visibility.Collapsed;
-            BarkEnabledCheckBox.IsChecked = true;
-            BarkServerTextBox.Text = "https://api.day.app";
-            BarkDeviceKeyPasswordBox.Password = string.Empty;
-        }
-        else if (channel == NotificationChannel.Ntfy)
-        {
-            NtfyChannelPanel.Visibility = Visibility.Collapsed;
-            NtfyEnabledCheckBox.IsChecked = true;
-            NtfyServerTextBox.Text = "https://ntfy.sh";
-            NtfyTopicTextBox.Text = string.Empty;
-            NtfyTokenPasswordBox.Password = string.Empty;
-        }
-        else if (channel == NotificationChannel.Qq)
-        {
+        if (channel == NotificationChannel.Qq)
             _qqBindingCancellation?.Cancel();
-            QqChannelPanel.Visibility = Visibility.Collapsed;
-            QqEnabledCheckBox.IsChecked = true;
-            QqAppIdTextBox.Text = string.Empty;
-            QqUserOpenIdTextBox.Text = string.Empty;
-            QqAppSecretPasswordBox.Password = string.Empty;
-            QqCredentialError.Visibility = Visibility.Collapsed;
-            QqBindingStatus.Text = string.Empty;
-        }
-        else
+        await SaveNotificationChannelEditAsync(channel, NotificationChannelEdit.Remove);
+    }
+
+    private async Task SaveNotificationChannelEditAsync(NotificationChannel channel, NotificationChannelEdit edit)
+    {
+        NotificationSettingsPanel.IsEnabled = false;
+        try
         {
-            QqEmailChannelPanel.Visibility = Visibility.Collapsed;
-            QqEmailEnabledCheckBox.IsChecked = true;
-            QqEmailSenderTextBox.Text = string.Empty;
-            QqEmailRecipientTextBox.Text = string.Empty;
-            QqEmailCodePasswordBox.Password = string.Empty;
-            QqEmailCredentialError.Visibility = Visibility.Collapsed;
+            await SaveSettingsFromControlsAsync(channelChange: (channel, edit));
         }
-        RefreshNotificationChannelChoices();
-        await SaveSettingsFromControlsAsync();
+        finally
+        {
+            NotificationSettingsPanel.IsEnabled = true;
+        }
     }
 
     private async void LastRunDetailsButton_Click(object sender, RoutedEventArgs e) => await _runner.ShowLastRunDetailsAsync();
