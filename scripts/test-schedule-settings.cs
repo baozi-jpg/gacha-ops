@@ -16,6 +16,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
+using System.Xml.Linq;
 using GachaOps.App;
 using GachaOps.Core.Models;
 using GachaOps.Core.Services;
@@ -60,6 +61,7 @@ internal static class ScheduleSettingsTests
         TaskCompletionSource? pendingSave = null;
         FileStream? failOnlyNextWrite = null;
         var failRegistration = false;
+        var failMorningRegistration = false;
         var registrations = 0;
         var writes = 0;
         var completedWrites = 0;
@@ -84,6 +86,12 @@ internal static class ScheduleSettingsTests
             Check(onDisk.ScheduledLaunchEnabled == settings.ScheduledLaunchEnabled
                 && onDisk.DailySchedules.SequenceEqual(settings.DailySchedules), "计划任务同步读取到本次已落盘的配置");
             if (failRegistration) throw new IOException("模拟计划任务同步失败");
+            return ScheduledTaskRegistration.Reconcile(settings, Path.Combine(root, "GachaOps.exe"), "test",
+                new Dictionary<string, XDocument>(), _ => { }, (name, _) =>
+                {
+                    if (failMorningRegistration && name == "GachaOps-test-Daily-0800-Run")
+                        throw new UnauthorizedAccessException("模拟单个时刻注册失败");
+                });
         });
 
         var panel = Control<Grid>("ScheduleSettingsPanel");
@@ -156,17 +164,25 @@ internal static class ScheduleSettingsTests
         await WaitForAsync(() => panel.IsEnabled);
         await CheckSavedAsync(remaining, launchEnabled: true, expectedRegistrations: 5);
 
-        failRegistration = true;
+        failMorningRegistration = true;
         SetTime("08", "15");
         Click(add);
         await WaitForAsync(() => panel.IsEnabled);
         var stillSaved = new DailySchedule[] { new("07:30", false), new("08:00"), new("08:15", false), new("18:00") };
         await CheckSavedAsync(stillSaved, launchEnabled: true, expectedRegistrations: 6);
+        Check(status.Text.Contains("设置已保存") && status.Text.Contains("08:00 运行任务注册失败")
+            && !status.Text.Contains("18:00"), "部分注册失败只提示对应时刻和任务类型");
+        failMorningRegistration = false;
+
+        failRegistration = true;
+        Click(Row<Button>("08:15"));
+        await WaitForAsync(() => panel.IsEnabled);
+        await CheckSavedAsync(remaining, launchEnabled: true, expectedRegistrations: 7);
         Check(status.Text.Contains("设置已保存") && status.Text.Contains("计划任务未能同步"), "同步失败优先显示，且不回退已保存的设置");
         failRegistration = false;
         Toggle(launch, false);
         await WaitForAsync(() => panel.IsEnabled);
-        await CheckSavedAsync(stillSaved, launchEnabled: false, expectedRegistrations: 7);
+        await CheckSavedAsync(remaining, launchEnabled: false, expectedRegistrations: 8);
         Check(status.Text == "定时已停用", "下一次定时改动重新同步");
         Console.WriteLine("PASS: enable, disable, ordered removal and registration failure after commit");
 
