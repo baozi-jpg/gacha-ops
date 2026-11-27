@@ -18,9 +18,10 @@ namespace GachaOps.App;
 
 public partial class MainWindow : Window
 {
-    private readonly SettingsStore _settingsStore = new();
-    private readonly HistoryStore _historyStore = new();
-    private readonly CrashLogStore _crashLogStore = new();
+    private readonly Func<AppSettings, CancellationToken, Task> _saveSettings;
+    private readonly Action<AppSettings> _synchronizeScheduledTasks;
+    private readonly HistoryStore _historyStore;
+    private readonly CrashLogStore _crashLogStore;
     private readonly NotificationService _notifications = new();
     private readonly WorkflowRunner _runner;
     private readonly Dictionary<ToolId, IAutomationAdapter> _adapters;
@@ -83,10 +84,22 @@ public partial class MainWindow : Window
 
     public MainWindow(AppSettings settings, ScheduledRequest? scheduledRequest = null,
         string? initialScheduledForegroundBlock = null)
+        : this(settings, DataRoot, new SettingsStore(DataRoot).SaveAsync, SynchronizeWindowsScheduledTasks,
+            scheduledRequest, initialScheduledForegroundBlock)
+    {
+    }
+
+    internal MainWindow(AppSettings settings, string dataRoot, Func<AppSettings, CancellationToken, Task> saveSettings,
+        Action<AppSettings> synchronizeScheduledTasks, ScheduledRequest? scheduledRequest = null,
+        string? initialScheduledForegroundBlock = null)
     {
         _initialScheduledRequest = scheduledRequest;
         _initialScheduledForegroundBlock = initialScheduledForegroundBlock;
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _saveSettings = saveSettings;
+        _synchronizeScheduledTasks = synchronizeScheduledTasks;
+        _historyStore = new(dataRoot);
+        _crashLogStore = new(dataRoot);
         _betterGiProfilesPath = settings.BetterGiPath.Trim();
         _maaProfilesPath = settings.MaaPath.Trim();
         _maaEndInstancesPath = settings.MaaEndPath.Trim();
@@ -101,7 +114,7 @@ public partial class MainWindow : Window
         var runHistory = new WorkflowRunHistory(_historyStore, _crashLogStore,
             ShowSavedHistoryRecordAsync, ShowHistorySaveFailureAsync);
         _runner = new WorkflowRunner(this, _adapters.Values.ToArray(), preparation, runHistory,
-            _historyStore, _crashLogStore, _notifications, DataRoot, _appCancellation.Token);
+            _historyStore, _crashLogStore, _notifications, dataRoot, _appCancellation.Token);
 
         InitializeComponent();
         HistoryGrid.ItemsSource = _historyRows;
@@ -549,14 +562,15 @@ public partial class MainWindow : Window
 
     private async Task<AppSettings?> SaveSettingsFromControlsAsync(
         string failureFooterText = SettingsSaveFailureFooterText,
-        (NotificationChannel Channel, NotificationChannelEdit Edit)? channelChange = null)
+        (NotificationChannel Channel, NotificationChannelEdit Edit)? channelChange = null,
+        (bool? Enabled, List<DailySchedule>? Rows)? scheduleChange = null)
     {
         _workflowSaveTimer.Stop();
         await _settingsSaveGate.WaitAsync(_appCancellation.Token);
         AppSettings settings;
         try
         {
-            // Read channel records after earlier saves have finished.
+            // Read the controls and saved settings after earlier saves have finished.
             var profileError = RunWithSettingsAutoSaveSuppressed(RefreshChangedProfilePaths);
             if (profileError is not null)
             {
@@ -564,16 +578,22 @@ public partial class MainWindow : Window
             }
             var targetWorkflowRevision = _workflowRevision;
             settings = ReadNormalizedSettingsFromControls();
+            if (scheduleChange is { } scheduleEdit)
+            {
+                settings.ScheduledLaunchEnabled = scheduleEdit.Enabled ?? settings.ScheduledLaunchEnabled;
+                settings.DailySchedules = scheduleEdit.Rows ?? settings.DailySchedules;
+            }
             if (channelChange is { } change)
                 EditNotificationChannel(settings, change.Channel, change.Edit);
 
             if (!SettingsAreEquivalent(settings, _settings)
                 || targetWorkflowRevision > _savedWorkflowRevision)
             {
-                await _settingsStore.SaveAsync(settings, _appCancellation.Token);
+                await _saveSettings(settings, _appCancellation.Token);
                 var scheduleChanged = !ScheduleSettingsEqual(settings, _settings);
                 _settings = settings;
-                if (scheduleChanged) RefreshScheduledRegistration();
+                if (scheduleChange is not null) ApplySavedScheduleToControls();
+                if (scheduleChanged) RefreshScheduledRegistration(settingsSaved: true);
                 _savedWorkflowRevision = targetWorkflowRevision;
             }
             else
@@ -689,8 +709,8 @@ public partial class MainWindow : Window
     {
         var settings = new AppSettings
         {
-            ScheduledLaunchEnabled = ScheduledLaunchCheckBox.IsChecked == true,
-            DailySchedules = _scheduleRows.ToList(),
+            ScheduledLaunchEnabled = _settings.ScheduledLaunchEnabled,
+            DailySchedules = _settings.DailySchedules,
             BetterGiPath = BetterGiPathTextBox.Text.Trim(),
             BetterGiMode = SelectedBetterGiMode(),
             BetterGiProfile = (BetterGiProfileComboBox.SelectedItem as string ?? BetterGiProfileComboBox.Text).Trim(),
@@ -785,7 +805,7 @@ public partial class MainWindow : Window
         try
         {
             _settings.WorkflowTasks = _workflow.CreateSnapshot().ToList();
-            await _settingsStore.SaveAsync(_settings, _appCancellation.Token);
+            await _saveSettings(_settings, _appCancellation.Token);
             _savedWorkflowRevision = targetRevision;
             saved = true;
             return true;

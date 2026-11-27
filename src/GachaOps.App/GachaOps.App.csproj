@@ -14,6 +14,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\GachaOps.Core\GachaOps.Core.csproj" />
+    <InternalsVisibleTo Include="GachaOps.ScheduleSettings.Tests" />
   </ItemGroup>
   <ItemGroup>
     <Resource Include="Assets\GachaOps.ico" />
