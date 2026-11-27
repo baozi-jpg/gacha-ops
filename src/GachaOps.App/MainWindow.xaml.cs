@@ -19,7 +19,7 @@ namespace GachaOps.App;
 public partial class MainWindow : Window
 {
     private readonly Func<AppSettings, CancellationToken, Task> _saveSettings;
-    private readonly Action<AppSettings> _synchronizeScheduledTasks;
+    private readonly Func<AppSettings, ScheduledTaskRegistration.SynchronizationResult> _synchronizeScheduledTasks;
     private readonly HistoryStore _historyStore;
     private readonly CrashLogStore _crashLogStore;
     private readonly NotificationService _notifications = new();
@@ -90,7 +90,7 @@ public partial class MainWindow : Window
     }
 
     internal MainWindow(AppSettings settings, string dataRoot, Func<AppSettings, CancellationToken, Task> saveSettings,
-        Action<AppSettings> synchronizeScheduledTasks, ScheduledRequest? scheduledRequest = null,
+        Func<AppSettings, ScheduledTaskRegistration.SynchronizationResult> synchronizeScheduledTasks, ScheduledRequest? scheduledRequest = null,
         string? initialScheduledForegroundBlock = null)
     {
         _initialScheduledRequest = scheduledRequest;

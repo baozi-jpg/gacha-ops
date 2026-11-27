@@ -67,8 +67,10 @@ internal static class ScheduledLaunchTests
         var disabled = new List<string>();
         var registered = new List<string>();
         const string owned = "GachaOps-test-Daily-0800-Run";
-        ScheduledTaskRegistration.Reconcile(settings, Path.Combine(NewRoot(), "GachaOps.exe"), "test",
-            new Dictionary<string, string?> { [owned] = ScheduledTaskRegistration.Owner }, disabled.Add,
+        var executable = Path.Combine(NewRoot(), "GachaOps.exe");
+        var ownedDefinition = XDocument.Parse(ScheduledTaskRegistration.CreateXml(executable, "test", "08:00", false, DateTime.Today));
+        ScheduledTaskRegistration.Reconcile(settings, executable, "test",
+            new Dictionary<string, XDocument> { [owned] = ownedDefinition }, disabled.Add,
             (name, _) => registered.Add(name));
         Check(disabled.SequenceEqual(new[] { owned }) && registered.Count == 0,
             "旧配置有冲突时停用已有任务，不能注册运行或提醒");
@@ -76,8 +78,8 @@ internal static class ScheduledLaunchTests
         Check(ScheduledLaunch.Validate(settings, new("12:00", true, now), now, TimeZoneInfo.Utc, out _) is not null,
             "冲突配置的遗留提醒入口也应拒绝");
         settings.DailySchedules[1] = settings.DailySchedules[1] with { IsEnabled = false };
-        ScheduledTaskRegistration.Reconcile(settings, Path.Combine(NewRoot(), "GachaOps.exe"), "test",
-            new Dictionary<string, string?>(), disabled.Add, (name, _) => registered.Add(name));
+        ScheduledTaskRegistration.Reconcile(settings, executable, "test",
+            new Dictionary<string, XDocument>(), disabled.Add, (name, _) => registered.Add(name));
         Check(registered.Count == 4, "解决冲突后恢复两个运行和两个提醒");
     }
 
@@ -355,7 +357,7 @@ internal static class ScheduledLaunchTests
     {
         var executable = Path.Combine(NewRoot(), "GachaOps.exe");
         const string prefix = "GachaOps-test-Daily-";
-        var existing = new Dictionary<string, string?> { [prefix + "0800-Run"] = ScheduledTaskRegistration.Owner, ["OtherApp"] = "other" };
+        var existing = new Dictionary<string, XDocument> { [prefix + "0800-Run"] = Definition("08:00"), ["OtherApp"] = new() };
         var disabled = new List<string>();
         var registered = new List<string>();
         for (var flags = 0; flags < 8; flags++)
@@ -370,23 +372,40 @@ internal static class ScheduledLaunchTests
             Check(registered.Count == (!settings.ScheduledLaunchEnabled ? 0 : flags == 7 ? 4 : 2), "提醒总开关与子开关组合");
             Check(registered.All(name => name.StartsWith(prefix) && !name.Contains("1017")), "单项停用不注册");
         }
-        existing[prefix + "0817-Run"] = "someone else";
+        existing[prefix + "0817-Run"] = new XDocument(new XElement("Task"));
         disabled.Clear();
+        registered.Clear();
         try
         {
-            ScheduledTaskRegistration.Reconcile(new(), executable, "test", existing, disabled.Add, (_, _) => { });
+            var enabled = new AppSettings { ScheduledLaunchEnabled = true, DailySchedules = [new("08:17")] };
+            ScheduledTaskRegistration.Reconcile(enabled, executable, "test", existing, disabled.Add, (name, _) => registered.Add(name));
             throw new IOException("所有权冲突应拒绝");
         }
-        catch (InvalidOperationException) { Check(disabled.Count == 0, "冲突前不能修改任何任务"); }
-        existing.Remove(prefix + "0817-Run");
-        try
+        catch (InvalidOperationException) { Check(disabled.Count == 0 && registered.Count == 0, "冲突前不能修改任何任务"); }
+
+        var multipleTimes = new AppSettings { ScheduledLaunchEnabled = true,
+            NotificationsEnabled = true, NotifyBeforeScheduledRun = true,
+            DailySchedules = [new("08:17"), new("09:31"), new("11:00"), new("13:00")] };
+        existing[prefix + "0817-Run"] = Definition("08:17");
+        existing[prefix + "0931-Run"] = Definition("09:31", target: Path.Combine(NewRoot(), "GachaOps.exe"));
+        existing[prefix + "1100-Reminder"] = Definition("11:00", reminder: true);
+        existing[prefix + "1300-Run"] = Definition("13:00");
+        var result = ScheduledTaskRegistration.Reconcile(multipleTimes, executable, "test", existing, disabled.Add, (name, _) =>
         {
-            ScheduledTaskRegistration.Reconcile(new() { ScheduledLaunchEnabled = true, DailySchedules = [new("08:17")] },
-                executable, "test", existing, _ => { }, (_, _) => throw new UnauthorizedAccessException());
-            throw new IOException("注册失败不能声称可用");
-        }
-        catch (UnauthorizedAccessException) { }
+            if (name == prefix + "0931-Run" || name == prefix + "1100-Reminder") throw new UnauthorizedAccessException();
+            registered.Add(name);
+        });
+        Check(disabled.SequenceEqual(new[] { prefix + "0800-Run", prefix + "0931-Run" }),
+            "只停用已不用的任务和指向旧程序的任务");
+        Check(registered.SequenceEqual(new[] { prefix + "0817-Run", prefix + "0817-Reminder", prefix + "0931-Reminder",
+            prefix + "1100-Run", prefix + "1300-Run", prefix + "1300-Reminder" }), "运行或提醒注册失败后仍继续同步其他任务");
+        Check(result.RegisteredRunTimes.SetEquals(new[] { "08:17", "11:00", "13:00" }), "只将注册成功的运行时刻设为可用");
+        Check(result.Failures.Select(failure => (failure.Task, failure.Operation)).SequenceEqual(new[]
+            { ("09:31 运行任务", "注册"), ("11:00 提醒任务", "注册") }), "失败记录精确到时刻和任务类别");
         return Task.CompletedTask;
+
+        XDocument Definition(string time, bool reminder = false, string? target = null) =>
+            XDocument.Parse(ScheduledTaskRegistration.CreateXml(target ?? executable, "test", time, reminder, DateTime.Today));
     }
 
     public static async Task SkipReportAsync()

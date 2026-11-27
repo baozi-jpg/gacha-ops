@@ -13,7 +13,7 @@ public partial class MainWindow
     internal static string DataRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "GachaOps");
     private readonly ScheduledRequest? _initialScheduledRequest;
     private readonly string? _initialScheduledForegroundBlock;
-    private bool _scheduleReady;
+    private ScheduledTaskRegistration.SynchronizationResult? _scheduleRegistration;
     private bool _initializationComplete;
 
     private void InitializeScheduleControls()
@@ -107,7 +107,7 @@ public partial class MainWindow
         {
             if (await SaveSettingsFromControlsAsync(scheduleChange: (enabled, rows)) is null)
                 ScheduleStatusText.Text = "定时设置未保存，请重试";
-            else if (_scheduleReady && successText is not null)
+            else if (_scheduleRegistration is { Failures.Count: 0 } && successText is not null)
                 ScheduleStatusText.Text = successText;
         }
         finally
@@ -124,16 +124,25 @@ public partial class MainWindow
 
     private void RefreshScheduledRegistration(bool settingsSaved = false)
     {
-        _scheduleReady = false;
+        _scheduleRegistration = null;
         try
         {
-            _synchronizeScheduledTasks(_settings);
+            var registration = _synchronizeScheduledTasks(_settings);
+            if (registration.Failures.Count > 0)
+            {
+                _scheduleRegistration = registration;
+                var failures = string.Join("、", registration.Failures.Select(failure => $"{failure.Task}{failure.Operation}失败"));
+                ScheduleStatusText.Text = $"{(settingsSaved ? "设置已保存。" : "")}{failures}。请重新打开程序重试。";
+                foreach (var failure in registration.Failures)
+                    _crashLogStore.TryWrite($"ScheduledRegistration {failure.Task}", failure.Error);
+                return;
+            }
             if (_settings.ScheduledLaunchEnabled && ScheduledLaunch.SpacingBlock(_settings.DailySchedules) is { } conflict)
             {
                 ScheduleStatusText.Text = $"定时已暂停：{conflict}";
                 return;
             }
-            _scheduleReady = true;
+            _scheduleRegistration = registration;
             ScheduleStatusText.Text = _settings.ScheduledLaunchEnabled
                 ? (_settings.DailySchedules.Any(item => item.IsEnabled) ? "定时已启用，关闭程序后仍有效" : "尚无已启用的时刻")
                 : "定时已停用";
@@ -147,13 +156,14 @@ public partial class MainWindow
         }
     }
 
-    private static void SynchronizeWindowsScheduledTasks(AppSettings settings)
+    private static ScheduledTaskRegistration.SynchronizationResult SynchronizeWindowsScheduledTasks(AppSettings settings)
     {
         var executable = Environment.ProcessPath ?? throw new InvalidOperationException("无法确定程序路径");
         var sid = WindowsIdentity.GetCurrent().User?.Value ?? throw new InvalidOperationException("无法确认当前用户");
-        ScheduledTaskRegistration.Synchronize(settings, executable, sid);
+        return ScheduledTaskRegistration.Synchronize(settings, executable, sid);
     }
 
     internal Task HandleScheduledRequestAsync(ScheduledRequest request, string? foregroundBlock) =>
-        _runner.HandleScheduledRequestAsync(request, foregroundBlock, _initializationComplete, _scheduleReady);
+        _runner.HandleScheduledRequestAsync(request, foregroundBlock, _initializationComplete,
+            _scheduleRegistration?.RegisteredRunTimes.Contains(request.Time) == true);
 }
